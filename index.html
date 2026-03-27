@@ -1,0 +1,1674 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CoproManager</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #07090f; font-family: Georgia, serif; }
+    #root { min-height: 100vh; }
+    input, select, textarea, button { font-family: system-ui, sans-serif; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <!-- React -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <!-- Babel (transpile JSX en live) -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef, useCallback } = React;
+
+// ═══════════════════════════════════════════════════════
+//  STORAGE — Firebase Realtime Database
+//  Sync temps réel entre tous les appareils
+//  + localStorage comme sauvegarde locale permanente
+// ═══════════════════════════════════════════════════════
+
+// ── Config Firebase ─────────────────────────────────────
+const FIREBASE_CONFIG = {
+  apiKey:            "AIzaSyABWFCesKWCftwhUHm9zzfvW-ef-rTVWrY",
+  authDomain:        "copro-manager13.firebaseapp.com",
+  databaseURL:       "https://copro-manager13-default-rtdb.firebaseio.com",
+  projectId:         "copro-manager13",
+  storageBucket:     "copro-manager13.firebasestorage.app",
+  messagingSenderId: "850361891714",
+  appId:             "1:850361891714:web:65052fef9a7d71f92ced9b",
+};
+const FB_PATH = "copro/data";
+
+// ── Clés localStorage (backup local permanent) ──────────
+const LS_PRIMARY   = "COPRO_MASTER_V1";
+const LS_BACKUP    = "COPRO_MASTER_V1_BCK";
+const LS_EMERGENCY = "COPRO_MASTER_V1_EMG";
+const WS_KEY       = "COPRO_WS_V1";
+
+const EMPTY = { superAdmin: null, copros: [] };
+
+// ── Firebase init ───────────────────────────────────────
+let _fbDB  = null;
+let _fbRef = null;
+let _fbReady = false;
+
+async function initFirebase() {
+  if (_fbReady) return true;
+  try {
+    if (!window.__fb_loaded) {
+      await loadScript("https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js");
+      await loadScript("https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js");
+      window.__fb_loaded = true;
+    }
+    if (!window.__fb_app) {
+      window.__fb_app = firebase.initializeApp(FIREBASE_CONFIG);
+    }
+    _fbDB  = firebase.database();
+    _fbRef = _fbDB.ref(FB_PATH);
+    _fbReady = true;
+    console.log("✅ Firebase connecté");
+    return true;
+  } catch(e) {
+    console.warn("Firebase init failed:", e.message);
+    return false;
+  }
+}
+
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    if (document.querySelector(`script[src="${src}"]`)) { resolve(); return; }
+    const s = document.createElement("script");
+    s.src = src;
+    s.onload = resolve;
+    s.onerror = reject;
+    document.head.appendChild(s);
+  });
+}
+
+// ── Score (choisir la meilleure version) ────────────────
+function score(d) {
+  if (!d?.superAdmin) return 0;
+  return 1 + (d.copros||[]).reduce((s,c)=>
+    s + (c.users||[]).length*100 + (c.appels||[]).length*10 + (c.depenses||[]).length, 0);
+}
+
+// ── Sauvegarde locale synchrone ─────────────────────────
+function saveLocalOnly(db) {
+  if (!db?.superAdmin) return;
+  const json = JSON.stringify(db);
+  try { localStorage.setItem(LS_PRIMARY,   json); } catch {}
+  try { localStorage.setItem(LS_BACKUP,    json); } catch {}
+  try { localStorage.setItem(LS_EMERGENCY, json); } catch {}
+  try { window.storage.set(WS_KEY, json).catch(()=>{}); } catch {}
+}
+
+// ── Sauvegarde complète (local + Firebase) ──────────────
+let _saveDebounce = null;
+async function saveSync(db) {
+  if (!db?.superAdmin) return;
+  // 1. Local SYNCHRONE immédiat
+  saveLocalOnly(db);
+  // 2. Firebase avec debounce 1.5s
+  if (_saveDebounce) clearTimeout(_saveDebounce);
+  _saveDebounce = setTimeout(async () => {
+    try {
+      const ok = await initFirebase();
+      if (ok && _fbRef) {
+        await _fbRef.set(db);
+        console.log("☁️ Firebase sync OK");
+      }
+    } catch(e) {
+      console.warn("Firebase write failed (local OK):", e.message);
+    }
+  }, 1500);
+}
+
+// ── Chargement initial (Firebase + local) ───────────────
+async function load() {
+  let best = null, bestScore = 0;
+
+  function tryUpdate(d) {
+    const s = score(d);
+    if (s > bestScore) { best = d; bestScore = s; }
+  }
+
+  // 1. Firebase (source la plus à jour)
+  try {
+    const ok = await initFirebase();
+    if (ok && _fbRef) {
+      const snap = await _fbRef.once("value");
+      const d = snap.val();
+      if (d?.superAdmin) { tryUpdate(d); console.log("☁️ Firebase chargé"); }
+    }
+  } catch(e) { console.warn("Firebase load failed, fallback local:", e.message); }
+
+  // 2. localStorage
+  for (const k of [LS_PRIMARY, LS_BACKUP, LS_EMERGENCY]) {
+    try { const r = localStorage.getItem(k); if (r) tryUpdate(JSON.parse(r)); } catch {}
+  }
+
+  // 3. window.storage
+  try {
+    const r = await window.storage.get(WS_KEY);
+    if (r?.value) tryUpdate(JSON.parse(r.value));
+  } catch {}
+
+  // 4. Anciennes clés (migration)
+  for (const k of ["COPRO_A","COPRO_B","COPRO_C","copro-manager-autosave"]) {
+    try { const r = localStorage.getItem(k); if (r) tryUpdate(JSON.parse(r)); } catch {}
+    try { const r = await window.storage.get(k); if (r?.value) tryUpdate(JSON.parse(r.value)); } catch {}
+  }
+
+  if (best) {
+    console.log(`✅ Données chargées (score ${bestScore}): ${best.copros?.length||0} copros`);
+    saveSync(best);
+    return { ...EMPTY, ...best, copros: best.copros||[] };
+  }
+  return null;
+}
+
+// ── Écoute temps réel Firebase ──────────────────────────
+let _unsubscribe = null;
+async function startRealtimeSync(onUpdate) {
+  try {
+    const ok = await initFirebase();
+    if (!ok || !_fbRef) return;
+    _unsubscribe = _fbRef.on("value", snap => {
+      const d = snap.val();
+      if (d?.superAdmin) {
+        saveLocalOnly(d); // sync locale silencieuse
+        onUpdate(d);
+      }
+    });
+    console.log("🔄 Écoute temps réel active");
+  } catch(e) { console.warn("Realtime sync failed:", e.message); }
+}
+function stopRealtimeSync() {
+  if (_fbRef && _unsubscribe) { _fbRef.off("value", _unsubscribe); _unsubscribe = null; }
+}
+
+// Export JSON
+function exportJSON(db) {
+  const blob = new Blob([JSON.stringify(db, null, 2)], { type:"application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `copro-backup-${new Date().toISOString().slice(0,10)}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+// Import JSON
+function importJSON(file, onDone) {
+  const r = new FileReader();
+  r.onload = e => {
+    try {
+      const d = JSON.parse(e.target.result);
+      if (d?.superAdmin) onDone(d);
+      else alert("Fichier invalide.");
+    } catch { alert("Erreur de lecture."); }
+  };
+  r.readAsText(file);
+}
+
+// ── Utilitaires ───────────────────────────────────────
+const uid   = () => Date.now().toString(36) + Math.random().toString(36).slice(2,6);
+const fEUR  = n => Number(n).toLocaleString("fr-FR",{style:"currency",currency:"EUR"});
+const fDATE = s => new Date(s).toLocaleDateString("fr-FR",{day:"2-digit",month:"short",year:"numeric"});
+const fM3   = n => Number(n).toFixed(3);
+const TODAY = () => new Date().toISOString().slice(0,10);
+
+function hash(p) {
+  let h = 5381;
+  for (let i=0;i<p.length;i++) h=((h<<5)+h)^p.charCodeAt(i);
+  return (h>>>0).toString(16);
+}
+
+function splitEqual(total, n) {
+  const base = Math.round(total/n*100)/100;
+  const arr = Array(n).fill(base);
+  const diff = Math.round((total - arr.reduce((s,v)=>s+v,0))*100)/100;
+  arr[n-1] = Math.round((arr[n-1]+diff)*100)/100;
+  return arr;
+}
+
+function splitByM3(consos, total) {
+  const tc = consos.reduce((s,v)=>s+v,0);
+  if (!tc) return Array(consos.length).fill(0);
+  const raw = consos.map(c=>(c/tc)*total);
+  const arr = raw.map(v=>Math.round(v*100)/100);
+  const diff = Math.round((total-arr.reduce((s,v)=>s+v,0))*100)/100;
+  arr[arr.length-1]=Math.round((arr[arr.length-1]+diff)*100)/100;
+  return arr;
+}
+
+// ═══════════════════════════════════════════════════════
+//  APP ROOT
+// ═══════════════════════════════════════════════════════
+function App() {
+  const [db, _setDb]       = useState(null);
+  const [screen, setScreen] = useState("boot");
+  const [session, setSession] = useState(null);
+  const [lastSaved, setLastSaved] = useState(null); // timestamp dernière sauvegarde
+  const dbRef  = useRef(null);
+  const autoSaveTimer = useRef(null);
+
+  const setDb = useCallback((d) => {
+    dbRef.current = d;
+    _setDb(d);
+  }, []);
+
+  // persist — sauvegarde SYNCHRONE immédiate + update état React
+  const persist = useCallback((newDb) => {
+    if (!newDb?.superAdmin) return;
+    // 1. Sauvegarde SYNCHRONE localStorage — fait AVANT le re-render
+    saveSync(newDb);
+    setLastSaved(Date.now());
+    // 2. Mise à jour état React
+    setDb(newDb);
+  }, [setDb]);
+
+  const persistCopro = useCallback((copro) => {
+    const cur = dbRef.current;
+    if (!cur) return;
+    const newDb = { ...cur, copros: cur.copros.map(c=>c.id===copro.id?copro:c) };
+    persist(newDb);
+  }, [persist]);
+
+  // ── Chargement initial ──
+  useEffect(() => {
+    const FRESH = { ...EMPTY, superAdmin:{ name:"Super Admin", login:"admin", password:hash("admin123") }, copros:[] };
+    const t = setTimeout(() => { saveSync(FRESH); setDb(FRESH); setScreen("login"); }, 4000);
+    load().then(d => {
+      clearTimeout(t);
+      const final = d || FRESH;
+      if (!d) saveSync(FRESH); // première utilisation
+      setDb(final);
+      setLastSaved(Date.now());
+      setScreen("login");
+    }).catch(() => { clearTimeout(t); saveSync(FRESH); setDb(FRESH); setScreen("login"); });
+  }, []);
+
+  // ── Auto-save toutes les 30 secondes ──
+  useEffect(() => {
+    autoSaveTimer.current = setInterval(() => {
+      const cur = dbRef.current;
+      if (cur?.superAdmin) {
+        saveSync(cur);
+        setLastSaved(Date.now());
+      }
+    }, 30 * 1000);
+    return () => clearInterval(autoSaveTimer.current);
+  }, []);
+
+  // ── Écoute Firebase temps réel ──
+  useEffect(() => {
+    // Démarrer la sync temps réel après chargement initial
+    const timer = setTimeout(() => {
+      startRealtimeSync((remoteDb) => {
+        const cur = dbRef.current;
+        if (!cur) return;
+        if (score(remoteDb) > score(cur)) {
+          console.log("🔄 Mise à jour temps réel Firebase");
+          setDb(remoteDb);
+          setLastSaved(Date.now());
+        }
+      });
+    }, 3000); // attendre 3s après le chargement initial
+    return () => { clearTimeout(timer); stopRealtimeSync(); };
+  }, []); // eslint-disable-line
+
+  // ── Sauvegarde automatique avant fermeture de page ──
+  useEffect(() => {
+    function handleUnload() {
+      const cur = dbRef.current;
+      if (!cur?.superAdmin) return;
+      // saveSync est déjà synchrone — parfait pour beforeunload
+      saveSync(cur);
+      console.log("🔒 Sauvegarde avant fermeture OK");
+    }
+    window.addEventListener("beforeunload", handleUnload);
+    window.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") handleUnload();
+    });
+    return () => {
+      window.removeEventListener("beforeunload", handleUnload);
+    };
+  }, []);
+
+  function logout() { setSession(null); setScreen("login"); }
+
+  const handleImport = (file) => {
+    importJSON(file, async (d) => {
+      await persist(d);
+      alert("✅ Données importées avec succès !");
+      setScreen("login");
+    });
+  };
+
+  if (screen==="boot") return <Splash />;
+
+  if (screen==="login") return (
+    <LoginPage db={db}
+      onSuperAdmin={() => setScreen("super-admin")}
+      onMember={(user,copro) => { setSession({user,copro}); setScreen("app"); }}
+      onImport={handleImport}
+    />
+  );
+
+  if (screen==="super-admin") return (
+    <SuperAdmin db={db} persist={persist} persistCopro={persistCopro}
+      onLogout={logout} lastSaved={lastSaved}
+      onExport={() => exportJSON(db)}
+      onImport={handleImport}
+      onEnterCopro={(copro) => {
+        const u = {id:"__admin__",name:db.superAdmin.name+" (Admin)",role:"syndic",type:"proprietaire",active:true};
+        setSession({user:u,copro,isAdmin:true});
+        setScreen("app");
+      }}
+    />
+  );
+
+  if (screen==="app" && session) {
+    const liveCopro = db?.copros?.find(c=>c.id===session.copro?.id) || session.copro;
+    return (
+      <CoproApp copro={liveCopro} user={session.user}
+        onPersistCopro={persistCopro}
+        onLogout={logout} lastSaved={lastSaved}
+        onBackAdmin={session.isAdmin ? ()=>setScreen("super-admin") : null}
+        onExport={() => exportJSON(db)}
+      />
+    );
+  }
+
+  return <Splash />;
+}
+
+// ═══════════════════════════════════════════════════════
+//  SPLASH
+// ═══════════════════════════════════════════════════════
+function Splash() {
+  return (
+    <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100vh",background:"#07090f"}}>
+      <div style={{textAlign:"center"}}>
+        <div style={{fontSize:44,marginBottom:14}}>🏢</div>
+        <div style={{fontFamily:"Georgia,serif",color:"#3b82f6",fontSize:18}}>Chargement…</div>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════
+//  LOGIN
+// ═══════════════════════════════════════════════════════
+function LoginPage({ db, onSuperAdmin, onMember, onImport }) {
+  const [login, setLogin] = useState("");
+  const [pass,  setPass]  = useState("");
+  const [err,   setErr]   = useState("");
+  const [busy,  setBusy]  = useState(false);
+  const fileRef = useRef();
+
+  function attempt() {
+    if (!login.trim()||!pass) return;
+    setErr(""); setBusy(true);
+    setTimeout(() => {
+      setBusy(false);
+      const h = hash(pass);
+      if (db?.superAdmin && login.trim().toLowerCase()===db.superAdmin.login && h===db.superAdmin.password) {
+        onSuperAdmin(); return;
+      }
+      for (const c of (db?.copros||[])) {
+        const u = (c.users||[]).find(u=>u.login===login.trim().toLowerCase()&&u.password===h&&u.active);
+        if (u) { onMember(u,c); return; }
+      }
+      setErr("Identifiant ou mot de passe incorrect.");
+      setPass("");
+    }, 400);
+  }
+
+  return (
+    <div style={{minHeight:"100vh",background:"#07090f",display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
+      <div style={{width:"100%",maxWidth:380}}>
+        <div style={{textAlign:"center",marginBottom:32}}>
+          <div style={{width:68,height:68,borderRadius:20,background:"linear-gradient(135deg,#1d4ed8,#3b82f6)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:34,margin:"0 auto 16px",boxShadow:"0 8px 32px #1d4ed855"}}>🏢</div>
+          <div style={{fontFamily:"Georgia,serif",fontSize:24,fontWeight:700,color:"#f0f9ff"}}>CoproManager</div>
+          <div style={{fontFamily:"system-ui",fontSize:13,color:"#475569",marginTop:4}}>Gestion de copropriété</div>
+        </div>
+
+        <div style={{background:"#0c1829",borderRadius:18,padding:"30px 26px",border:"1px solid #1a3a5f33",boxShadow:"0 24px 60px rgba(0,0,0,0.5)"}}>
+          <div style={{fontFamily:"system-ui",fontSize:15,fontWeight:700,color:"#e2e8f0",marginBottom:22}}>Connexion</div>
+
+          <FL label="Identifiant (email ou téléphone)">
+            <FI value={login} onChange={setLogin} placeholder="votre identifiant" onKey={e=>e.key==="Enter"&&attempt()} autoFocus />
+          </FL>
+          <FL label="Mot de passe">
+            <FI type="password" value={pass} onChange={setPass} placeholder="••••••••" onKey={e=>e.key==="Enter"&&attempt()} />
+          </FL>
+
+          {err && <Err>{err}</Err>}
+
+          <Btn onClick={attempt} disabled={!login.trim()||!pass||busy} full style={{marginTop:4}}>
+            {busy?"Vérification…":"Se connecter →"}
+          </Btn>
+
+          <div style={{marginTop:18,paddingTop:16,borderTop:"1px solid #1a3a5f33",textAlign:"center"}}>
+            <button onClick={()=>fileRef.current.click()} style={{background:"none",border:"1px solid #1a3a5f",color:"#64748b",padding:"7px 16px",borderRadius:9,cursor:"pointer",fontFamily:"system-ui",fontSize:12}}>
+              📂 Restaurer une sauvegarde (.json)
+            </button>
+            <input ref={fileRef} type="file" accept=".json" style={{display:"none"}} onChange={e=>e.target.files[0]&&onImport(e.target.files[0])} />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════
+//  SUPER ADMIN
+// ═══════════════════════════════════════════════════════
+function SuperAdmin({ db, persist, persistCopro, onLogout, onExport, onImport, onEnterCopro, lastSaved }) {
+  const [tab, setTab] = useState("copros");
+  const [selCopro, setSelCopro] = useState(null);
+
+  // Toujours utiliser la copro fraîche depuis db
+  const activeCopro = selCopro ? db.copros.find(c=>c.id===selCopro.id)||selCopro : null;
+
+  const fileRef = useRef();
+
+  return (
+    <div style={S.root}>
+      <header style={S.header}>
+        <div>
+          <div style={S.eyebrow}>Super Administrateur</div>
+          <div style={S.title}>CoproManager</div>
+        </div>
+        <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+          <SaveBadge lastSaved={lastSaved} />
+          <button onClick={onExport} style={{padding:"6px 14px",borderRadius:8,border:"1px solid #166834",background:"#14532d22",color:"#4ade80",fontFamily:"system-ui",fontSize:12,fontWeight:700,cursor:"pointer"}}>
+            💾 Export (.json)
+          </button>
+          <button onClick={()=>fileRef.current.click()} style={{padding:"6px 14px",borderRadius:8,border:"1px solid #1a3a5f",background:"transparent",color:"#64748b",fontFamily:"system-ui",fontSize:12,cursor:"pointer"}}>
+            📂 Restaurer
+          </button>
+          <input ref={fileRef} type="file" accept=".json" style={{display:"none"}} onChange={e=>e.target.files[0]&&onImport(e.target.files[0])} />
+          <SmBtn onClick={onLogout} danger>Déconnexion</SmBtn>
+        </div>
+      </header>
+
+      {/* Barre de statut sauvegarde */}
+      <DataStatusBar lastSaved={lastSaved} db={db} onExport={onExport} />
+
+      <div style={S.tabBar}>
+        {[{id:"copros",l:"🏢 Copropriétés"},{id:"compte",l:"⚙️ Mon compte"}].map(t=>(
+          <button key={t.id} onClick={()=>{setTab(t.id);if(t.id!=="users")setSelCopro(null);}} style={{...S.tabBtn,...(tab===t.id&&!selCopro?S.tabAct:{})}}>
+            {t.l}
+          </button>
+        ))}
+        {activeCopro && (
+          <button onClick={()=>setTab("users")} style={{...S.tabBtn,...(tab==="users"?S.tabAct:{}),marginLeft:8,borderLeft:"1px solid #1a3a5f",paddingLeft:16}}>
+            👥 Utilisateurs — {activeCopro.name}
+          </button>
+        )}
+      </div>
+
+      <main style={S.main}>
+        {tab==="users" && activeCopro && (
+          <UsersTab copro={activeCopro} db={db} persist={persist}
+            onBack={()=>{setTab("copros");setSelCopro(null);}} />
+        )}
+        {tab==="copros" && (
+          <CoprosTab db={db} persist={persist}
+            onManageUsers={c=>{setSelCopro(c);setTab("users");}}
+            onEnterCopro={onEnterCopro} />
+        )}
+        {tab==="compte" && (
+          <AccountTab db={db} persist={persist} />
+        )}
+      </main>
+    </div>
+  );
+}
+
+// ─── Onglet Copropriétés ──────────────────────────────
+function CoprosTab({ db, persist, onManageUsers, onEnterCopro }) {
+  const [showForm, setShowForm] = useState(false);
+  const [edit, setEdit] = useState(null);
+  const [form, setForm] = useState({name:"",address:"",iban:""});
+
+  function openCreate() { setEdit(null); setForm({name:"",address:"",iban:""}); setShowForm(true); }
+  function openEdit(c)  { setEdit(c); setForm({name:c.name,address:c.address||"",iban:c.iban||""}); setShowForm(true); }
+
+  async function saveCopro() {
+    if (!form.name.trim()) return;
+    const copros = edit
+      ? db.copros.map(c=>c.id===edit.id?{...c,...form}:c)
+      : [...db.copros,{id:uid(),...form,refPriceM3:"",assuranceAnnuelle:"",users:[],appels:[],depenses:[]}];
+    await persist({...db,copros});
+    setShowForm(false);
+  }
+
+  async function delCopro(id) {
+    if (!confirm("Supprimer cette copropriété et toutes ses données ?")) return;
+    await persist({...db,copros:db.copros.filter(c=>c.id!==id)});
+  }
+
+  const total_users  = db.copros.reduce((s,c)=>s+(c.users||[]).length,0);
+  const total_appels = db.copros.reduce((s,c)=>s+(c.appels||[]).length,0);
+
+  return (
+    <div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:12,marginBottom:22}}>
+        <KPI icon="🏢" label="Copropriétés" val={db.copros.length} color="#60a5fa"/>
+        <KPI icon="👥" label="Utilisateurs"  val={total_users}      color="#4ade80"/>
+        <KPI icon="📢" label="Appels total"  val={total_appels}     color="#f59e0b"/>
+      </div>
+
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+        <h2 style={S.h2}>Copropriétés</h2>
+        <Btn small onClick={openCreate}>+ Nouvelle copropriété</Btn>
+      </div>
+
+      {showForm && (
+        <div style={{...S.card,border:"1px solid #2563eb55",marginBottom:20}}>
+          <div style={{fontFamily:"system-ui",fontSize:13,fontWeight:700,color:"#60a5fa",marginBottom:16}}>
+            {edit?"✏️ Modifier":"🏢 Nouvelle copropriété"}
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
+            <FL label="Nom *"><FI value={form.name} onChange={v=>setForm(p=>({...p,name:v}))} placeholder="Résidence Les Mimosas"/></FL>
+            <FL label="Adresse"><FI value={form.address} onChange={v=>setForm(p=>({...p,address:v}))} placeholder="12 rue de la Paix, 13001 Marseille"/></FL>
+          </div>
+          <FL label="IBAN / Coordonnées bancaires (affiché aux membres pour leurs virements)">
+            <textarea value={form.iban} onChange={e=>setForm(p=>({...p,iban:e.target.value}))}
+              placeholder={"FR76 XXXX XXXX XXXX XXXX XXXX XXX\nTitulaire : Jean Dupont"}
+              style={{...S.inp,height:68,resize:"vertical"}}/>
+          </FL>
+          <div style={{display:"flex",gap:10}}>
+            <SecBtn onClick={()=>setShowForm(false)}>Annuler</SecBtn>
+            <Btn disabled={!form.name.trim()} onClick={saveCopro}>{edit?"Enregistrer":"Créer"}</Btn>
+          </div>
+        </div>
+      )}
+
+      {db.copros.length===0&&!showForm && (
+        <Empty>Aucune copropriété.<br/>Créez-en une puis ajoutez ses utilisateurs.</Empty>
+      )}
+
+      {db.copros.map(c=>{
+        const bal = (c.appels||[]).flatMap(a=>(a.payments||[]).filter(p=>p.paid)).reduce((s,p)=>s+Number(p.amount),0)
+                  - (c.depenses||[]).reduce((s,d)=>s+Number(d.amount),0);
+        return (
+          <div key={c.id} style={{...S.card,marginBottom:14,border:"1px solid #1a3a5f"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:12}}>
+              <div style={{display:"flex",gap:14,alignItems:"center",flex:1}}>
+                <div style={{width:50,height:50,borderRadius:14,background:"linear-gradient(135deg,#1d4ed8,#2563eb)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:24,flexShrink:0}}>🏢</div>
+                <div>
+                  <div style={{fontFamily:"system-ui",fontSize:16,fontWeight:700,color:"#f0f9ff"}}>{c.name}</div>
+                  {c.address&&<div style={{fontFamily:"system-ui",fontSize:12,color:"#475569",marginTop:2}}>{c.address}</div>}
+                  <div style={{display:"flex",gap:10,marginTop:7,flexWrap:"wrap"}}>
+                    <Tag color="#60a5fa">{(c.users||[]).length} utilisateur{(c.users||[]).length!==1?"s":""}</Tag>
+                    <Tag color={bal>=0?"#4ade80":"#f87171"}>{fEUR(bal)} caisse</Tag>
+                    <Tag color="#f59e0b">{(c.appels||[]).length} appel{(c.appels||[]).length!==1?"s":""}</Tag>
+                  </div>
+                </div>
+              </div>
+              <div style={{display:"flex",gap:8,flexShrink:0,flexWrap:"wrap",justifyContent:"flex-end"}}>
+                <button onClick={()=>onEnterCopro(c)} style={{padding:"8px 16px",borderRadius:9,border:"none",background:"linear-gradient(135deg,#059669,#10b981)",color:"#fff",fontFamily:"system-ui",fontSize:13,fontWeight:700,cursor:"pointer"}}>
+                  🚀 Accéder
+                </button>
+                <button onClick={()=>onManageUsers(c)} style={{padding:"8px 14px",borderRadius:9,border:"1px solid #2563eb55",background:"#1d4ed822",color:"#60a5fa",fontFamily:"system-ui",fontSize:13,fontWeight:700,cursor:"pointer"}}>
+                  👥 Utilisateurs
+                </button>
+                <IBtn onClick={()=>openEdit(c)} title="Modifier">✏️</IBtn>
+                <IBtn onClick={()=>delCopro(c.id)} danger>🗑</IBtn>
+              </div>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ─── Onglet Utilisateurs ──────────────────────────────
+function UsersTab({ copro, db, persist, onBack }) {
+  const [showForm, setShowForm] = useState(false);
+  const [edit, setEdit]   = useState(null);
+  const [form, setForm]   = useState({name:"",login:"",password:"",role:"membre",type:"proprietaire",active:true});
+  const [err,  setErr]    = useState("");
+  const [search, setSearch] = useState("");
+
+  function openCreate() { setEdit(null); setForm({name:"",login:"",password:"",role:"membre",type:"proprietaire",active:true}); setShowForm(true); setErr(""); }
+  function openEdit(u)  { setEdit(u); setForm({...u,password:""}); setShowForm(true); setErr(""); }
+
+  async function saveUser() {
+    setErr("");
+    if (!form.name.trim())  { setErr("Nom requis.");         return; }
+    if (!form.login.trim()) { setErr("Identifiant requis."); return; }
+    const loginLc = form.login.trim().toLowerCase();
+    if (loginLc===db.superAdmin.login) { setErr("Identifiant réservé au super admin."); return; }
+    const allLogins = db.copros.flatMap(c=>(c.users||[]).map(u=>({login:u.login,id:u.id})));
+    if (allLogins.find(x=>x.login===loginLc&&x.id!==edit?.id)) { setErr("Identifiant déjà utilisé."); return; }
+
+    let user;
+    if (edit) {
+      user = {...edit,name:form.name.trim(),login:loginLc,role:form.role,type:form.type,active:form.active};
+      if (form.password) user.password = hash(form.password);
+    } else {
+      if (!form.password||form.password.length<4) { setErr("Mot de passe min. 4 caractères."); return; }
+      user = {id:uid(),name:form.name.trim(),login:loginLc,password:hash(form.password),role:form.role,type:form.type,active:true};
+    }
+
+    const users = edit ? copro.users.map(u=>u.id===edit.id?user:u) : [...(copro.users||[]),user];
+    await persist({...db,copros:db.copros.map(c=>c.id===copro.id?{...copro,users}:c)});
+    setShowForm(false);
+  }
+
+  async function toggleActive(u) {
+    const users = (copro.users||[]).map(x=>x.id===u.id?{...x,active:!x.active}:x);
+    await persist({...db,copros:db.copros.map(c=>c.id===copro.id?{...copro,users}:c)});
+  }
+
+  async function delUser(u) {
+    if (!confirm(`Supprimer ${u.name} ?`)) return;
+    const users = (copro.users||[]).filter(x=>x.id!==u.id);
+    await persist({...db,copros:db.copros.map(c=>c.id===copro.id?{...copro,users}:c)});
+  }
+
+  const filtered = (copro.users||[]).filter(u=>
+    u.name.toLowerCase().includes(search.toLowerCase())||
+    u.login.toLowerCase().includes(search.toLowerCase())
+  );
+
+  return (
+    <div>
+      <div style={{display:"flex",alignItems:"center",gap:14,marginBottom:22}}>
+        <button onClick={onBack} style={{padding:"7px 14px",borderRadius:9,border:"1px solid #1a3a5f",background:"transparent",color:"#64748b",fontFamily:"system-ui",fontSize:13,cursor:"pointer"}}>← Retour</button>
+        <div>
+          <h2 style={{...S.h2,marginBottom:2}}>👥 Utilisateurs</h2>
+          <div style={{fontFamily:"system-ui",fontSize:12,color:"#475569"}}>🏢 {copro.name}</div>
+        </div>
+      </div>
+
+      <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10,marginBottom:18}}>
+        <KPI icon="👤" label="Total"         val={(copro.users||[]).length}                               color="#60a5fa"/>
+        <KPI icon="✅" label="Actifs"         val={(copro.users||[]).filter(u=>u.active).length}           color="#4ade80"/>
+        <KPI icon="🏠" label="Propriétaires" val={(copro.users||[]).filter(u=>u.type==="proprietaire").length} color="#f59e0b"/>
+        <KPI icon="🔑" label="Locataires"    val={(copro.users||[]).filter(u=>u.type==="locataire").length} color="#a78bfa"/>
+      </div>
+
+      <div style={{display:"flex",gap:10,marginBottom:16}}>
+        <div style={{position:"relative",flex:1}}>
+          <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Rechercher…" style={{...S.inp,paddingLeft:36}}/>
+          <span style={{position:"absolute",left:12,top:"50%",transform:"translateY(-50%)",color:"#475569"}}>🔍</span>
+        </div>
+        <Btn small onClick={openCreate}>+ Nouvel utilisateur</Btn>
+      </div>
+
+      {showForm && (
+        <div style={{...S.card,border:"1px solid #2563eb55",marginBottom:18}}>
+          <div style={{fontFamily:"system-ui",fontSize:13,fontWeight:700,color:"#60a5fa",marginBottom:16}}>
+            {edit?`✏️ Modifier — ${edit.name}`:"➕ Nouvel utilisateur"}
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
+            <FL label="Nom complet *"><FI value={form.name} onChange={v=>setForm(p=>({...p,name:v}))} placeholder="Prénom Nom"/></FL>
+            <FL label="Identifiant (email ou téléphone) *"><FI value={form.login} onChange={v=>setForm(p=>({...p,login:v}))} placeholder="email ou 06XXXXXXXX"/></FL>
+            <FL label={edit?"Nouveau mot de passe (vide = inchangé)":"Mot de passe *"}>
+              <FI type="password" value={form.password} onChange={v=>setForm(p=>({...p,password:v}))} placeholder={edit?"(inchangé)":"Min. 4 caractères"}/>
+            </FL>
+            <FL label="Rôle">
+              <select value={form.role} onChange={e=>setForm(p=>({...p,role:e.target.value}))} style={S.inp}>
+                <option value="syndic">Syndic — gère appels et caisse</option>
+                <option value="membre">Membre — saisit ses relevés</option>
+              </select>
+            </FL>
+            <FL label="Type">
+              <select value={form.type} onChange={e=>setForm(p=>({...p,type:e.target.value}))} style={S.inp}>
+                <option value="proprietaire">🏠 Propriétaire</option>
+                <option value="locataire">🔑 Locataire</option>
+              </select>
+            </FL>
+            {edit && (
+              <FL label="Statut">
+                <select value={form.active?"1":"0"} onChange={e=>setForm(p=>({...p,active:e.target.value==="1"}))} style={S.inp}>
+                  <option value="1">✅ Actif</option>
+                  <option value="0">🚫 Inactif</option>
+                </select>
+              </FL>
+            )}
+          </div>
+          {err && <Err>{err}</Err>}
+          <div style={{display:"flex",gap:10,marginTop:6}}>
+            <SecBtn onClick={()=>setShowForm(false)}>Annuler</SecBtn>
+            <Btn onClick={saveUser}>{edit?"Enregistrer les modifications":"Créer l'utilisateur"}</Btn>
+          </div>
+        </div>
+      )}
+
+      {filtered.length===0&&!showForm && (
+        <Empty>Aucun utilisateur.<br/>Cliquez sur <strong>+ Nouvel utilisateur</strong> pour commencer.</Empty>
+      )}
+
+      {filtered.length>0 && (
+        <div style={{border:"1px solid #1a3a5f33",borderRadius:12,overflow:"hidden"}}>
+          <div style={{display:"grid",gridTemplateColumns:"2fr 2fr 1fr 1fr 90px",gap:0,background:"#060c16",padding:"10px 16px",borderBottom:"1px solid #1a3a5f22"}}>
+            {["Nom","Identifiant","Rôle","Statut","Actions"].map(h=>(
+              <div key={h} style={{fontFamily:"system-ui",fontSize:11,fontWeight:700,color:"#334155",letterSpacing:1,textTransform:"uppercase"}}>{h}</div>
+            ))}
+          </div>
+          {filtered.map((u,i)=>(
+            <div key={u.id} style={{display:"grid",gridTemplateColumns:"2fr 2fr 1fr 1fr 90px",gap:0,padding:"12px 16px",borderBottom:i<filtered.length-1?"1px solid #1a3a5f11":"none",background:i%2===0?"#0c1829":"#090f1d",alignItems:"center"}}>
+              <div style={{display:"flex",alignItems:"center",gap:10}}>
+                <Av name={u.name} idx={i} size={32}/>
+                <div>
+                  <div style={{fontFamily:"system-ui",fontSize:13,fontWeight:600,color:"#e2e8f0"}}>{u.name}</div>
+                  <div style={{fontFamily:"system-ui",fontSize:11,color:"#475569"}}>{u.type==="proprietaire"?"🏠":"🔑"} {u.type}</div>
+                </div>
+              </div>
+              <div style={{fontFamily:"system-ui",fontSize:12,color:"#64748b"}}>{u.login}</div>
+              <div><Tag color={u.role==="syndic"?"#60a5fa":"#a3e635"}>{u.role}</Tag></div>
+              <div><span style={{fontFamily:"system-ui",fontSize:11,padding:"3px 9px",borderRadius:20,background:u.active?"#14532d":"#450a0a",color:u.active?"#4ade80":"#f87171"}}>{u.active?"Actif":"Inactif"}</span></div>
+              <div style={{display:"flex",gap:4}}>
+                <IBtn onClick={()=>openEdit(u)} title="Modifier">✏️</IBtn>
+                <IBtn onClick={()=>toggleActive(u)} title={u.active?"Désactiver":"Activer"}>{u.active?"🚫":"✅"}</IBtn>
+                <IBtn onClick={()=>delUser(u)} danger>🗑</IBtn>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Compte super admin ───────────────────────────────
+function AccountTab({ db, persist }) {
+  const [name, setName] = useState(db.superAdmin.name);
+  const [login,setLogin]= useState(db.superAdmin.login);
+  const [pass, setPass] = useState("");
+  const [conf, setConf] = useState("");
+  const [err,  setErr]  = useState("");
+  const [ok,   setOk]   = useState(false);
+
+  async function save() {
+    setErr("");
+    if (!login.trim()) { setErr("Identifiant requis."); return; }
+    if (pass&&pass.length<4) { setErr("Mot de passe trop court."); return; }
+    if (pass&&pass!==conf) { setErr("Mots de passe différents."); return; }
+    const sa = {...db.superAdmin,name:name.trim(),login:login.trim().toLowerCase()};
+    if (pass) sa.password=hash(pass);
+    await persist({...db,superAdmin:sa});
+    setOk(true); setPass(""); setConf(""); setTimeout(()=>setOk(false),2000);
+  }
+
+  return (
+    <div style={{maxWidth:480}}>
+      <h2 style={S.h2}>Mon compte</h2>
+      <div style={S.card}>
+        <FL label="Nom"><FI value={name} onChange={setName}/></FL>
+        <FL label="Identifiant de connexion"><FI value={login} onChange={setLogin}/></FL>
+        <FL label="Nouveau mot de passe"><FI type="password" value={pass} onChange={setPass} placeholder="(inchangé)"/></FL>
+        <FL label="Confirmer"><FI type="password" value={conf} onChange={setConf}/></FL>
+        {err&&<Err>{err}</Err>}
+        <Btn onClick={save}>{ok?"✓ Sauvegardé !":"Enregistrer"}</Btn>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════
+//  COPRO APP (syndic + membres)
+// ═══════════════════════════════════════════════════════
+function CoproApp({ copro, user, onPersistCopro, onLogout, onBackAdmin, onExport, lastSaved }) {
+  const [tab, setTab] = useState("dashboard");
+  const isSyndic = user.role==="syndic";
+  const members  = (copro.users||[]).filter(u=>u.active&&u.id!=="__admin__");
+
+  async function updateCopro(patch) {
+    await onPersistCopro({...copro,...patch});
+  }
+
+  const balance = (()=>{
+    const IN  = (copro.appels||[]).flatMap(a=>(a.payments||[]).filter(p=>p.paid)).reduce((s,p)=>s+Number(p.amount),0);
+    const OUT = (copro.depenses||[]).reduce((s,d)=>s+Number(d.amount),0);
+    return IN-OUT;
+  })();
+
+  const TABS = [
+    {id:"dashboard",label:"🏠 Accueil",   show:true},
+    {id:"appels",   label:"📢 Appels",     show:isSyndic},
+    {id:"releve",   label:"💧 Mon relevé", show:!isSyndic},
+    {id:"caisse",   label:"🏦 Caisse",     show:isSyndic},
+    {id:"depenses", label:"💸 Dépenses",   show:isSyndic},
+    {id:"params",   label:"⚙️ Paramètres", show:isSyndic},
+  ].filter(t=>t.show);
+
+  return (
+    <div style={S.root}>
+      <header style={S.header}>
+        <div>
+          <div style={S.eyebrow}>{copro.name}</div>
+          <div style={S.title}>{user.name}</div>
+        </div>
+        <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+          {onBackAdmin && (
+            <button onClick={onBackAdmin} style={{padding:"6px 14px",borderRadius:8,border:"1px solid #f59e0b55",background:"#f59e0b18",color:"#f59e0b",fontFamily:"system-ui",fontSize:12,fontWeight:700,cursor:"pointer"}}>← Admin</button>
+          )}
+          <SaveBadge lastSaved={lastSaved} />
+          {isSyndic && (
+            <button onClick={onExport} style={{padding:"6px 14px",borderRadius:8,border:"1px solid #166834",background:"#14532d22",color:"#4ade80",fontFamily:"system-ui",fontSize:12,fontWeight:700,cursor:"pointer"}}>💾 Export</button>
+          )}
+          <Tag color={isSyndic?"#60a5fa":"#a3e635"}>{isSyndic?"Syndic":"Membre"}</Tag>
+          {isSyndic&&<span style={{fontFamily:"system-ui",fontSize:12,color:"#4ade80",fontWeight:700}}>{fEUR(balance)}</span>}
+          {!onBackAdmin&&<SmBtn onClick={onLogout} danger>Déconnexion</SmBtn>}
+        </div>
+      </header>
+
+      <div style={S.tabBar}>
+        {TABS.map(t=>(
+          <button key={t.id} onClick={()=>setTab(t.id)} style={{...S.tabBtn,...(tab===t.id?S.tabAct:{})}}>{t.label}</button>
+        ))}
+      </div>
+
+      <main style={S.main}>
+        {tab==="dashboard" && <Dashboard copro={copro} user={user} isSyndic={isSyndic} balance={balance} members={members}/>}
+        {tab==="appels"    && isSyndic && <AppelsTab copro={copro} members={members} update={updateCopro}/>}
+        {tab==="releve"    && !isSyndic && <ReleveTab copro={copro} user={user} update={updateCopro}/>}
+        {tab==="caisse"    && isSyndic && <CaisseTab copro={copro} balance={balance} update={updateCopro}/>}
+        {tab==="depenses"  && isSyndic && <DepensesTab copro={copro} update={updateCopro}/>}
+        {tab==="params"    && isSyndic && <ParamsTab copro={copro} update={updateCopro}/>}
+      </main>
+    </div>
+  );
+}
+
+// ─── Dashboard ────────────────────────────────────────
+function Dashboard({ copro, user, isSyndic, balance, members }) {
+  const myPending = (copro.appels||[])
+    .filter(a => a.status !== "open") // exclure eau en attente de relevés (montant pas encore calculé)
+    .flatMap(a =>
+      (a.payments||[])
+        .filter(p => p.owner===user.id && !p.paid && Number(p.amount) > 0)
+        .map(p => ({
+          ...p,
+          appelTitle: a.title,
+          appelDate:  a.date,
+          appelType:  a.type,
+          totalBill:  a.totalBill,
+          priceM3:    a.priceM3 || null,
+          totalConso: a.totalConso || null,
+        }))
+    );
+  const openReleves = (copro.appels||[]).filter(a=>a.type==="eau"&&a.status==="open");
+
+  return (
+    <div>
+      <div style={{...S.card,background:"linear-gradient(135deg,#0d1e38,#0a1628)",border:"1px solid #1d4ed833",marginBottom:20}}>
+        <div style={{fontFamily:"system-ui",fontSize:13,color:"#475569",marginBottom:4}}>Bienvenue,</div>
+        <div style={{fontFamily:"Georgia,serif",fontSize:22,fontWeight:700,color:"#f0f9ff",marginBottom:isSyndic?16:0}}>{user.name}</div>
+        {isSyndic && (
+          <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10}}>
+            <MK label="Solde"         val={fEUR(balance)}    color={balance>=0?"#4ade80":"#f87171"}/>
+            <MK label="Appels actifs" val={(copro.appels||[]).filter(a=>a.status!=="complete").length} color="#60a5fa"/>
+            <MK label="Membres"       val={members.length}   color="#a78bfa"/>
+          </div>
+        )}
+      </div>
+
+      {myPending.length>0 && (
+        <Sec title={`⚠️ À payer (${myPending.length})`}>
+          {myPending.map((p,i)=>(
+            <div key={i} style={{...S.card,border:"1px solid #f59e0b44",marginBottom:10}}>
+              {/* En-tête : titre + montant */}
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:14}}>
+                <div>
+                  <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
+                    <span style={{fontSize:16}}>{p.appelType==="eau"?"💧":p.appelType==="assurance"?"🛡️":"📁"}</span>
+                    <span style={{fontFamily:"system-ui",fontWeight:700,color:"#fde68a",fontSize:15}}>{p.appelTitle}</span>
+                  </div>
+                  <div style={{fontFamily:"system-ui",fontSize:12,color:"#64748b"}}>{fDATE(p.appelDate)}</div>
+                </div>
+                <div style={{textAlign:"right"}}>
+                  <div style={{fontFamily:"Georgia,serif",fontSize:26,fontWeight:700,color:"#f59e0b"}}>{fEUR(p.amount)}</div>
+                  <div style={{fontFamily:"system-ui",fontSize:11,color:"#64748b"}}>à virer</div>
+                </div>
+              </div>
+
+              {/* Détail calcul */}
+              <div style={{background:"#060c16",borderRadius:10,padding:"12px",border:"1px solid #1a3a5f44",marginBottom:12}}>
+                <div style={{fontFamily:"system-ui",fontSize:11,color:"#475569",fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>📊 Détail</div>
+                {p.appelType==="eau" && p.m3 > 0 && (
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6,marginBottom:8}}>
+                    <div style={{fontFamily:"system-ui",fontSize:12}}>
+                      <span style={{color:"#64748b"}}>Votre conso : </span>
+                      <span style={{color:"#38bdf8",fontWeight:700}}>{fM3(p.m3)} m³</span>
+                    </div>
+                    {p.totalConso && <div style={{fontFamily:"system-ui",fontSize:12}}>
+                      <span style={{color:"#64748b"}}>Total copro : </span>
+                      <span style={{color:"#94a3b8"}}>{fM3(p.totalConso)} m³</span>
+                    </div>}
+                    {p.priceM3 && <div style={{fontFamily:"system-ui",fontSize:12}}>
+                      <span style={{color:"#64748b"}}>Prix m³ : </span>
+                      <span style={{color:"#a78bfa",fontWeight:700}}>{p.priceM3.toFixed(5)} €</span>
+                    </div>}
+                    {p.totalBill && <div style={{fontFamily:"system-ui",fontSize:12}}>
+                      <span style={{color:"#64748b"}}>Facture totale : </span>
+                      <span style={{color:"#e2e8f0"}}>{fEUR(p.totalBill)}</span>
+                    </div>}
+                    {p.m3>0 && p.totalConso>0 && <div style={{fontFamily:"system-ui",fontSize:12}}>
+                      <span style={{color:"#64748b"}}>Votre part : </span>
+                      <span style={{color:"#4ade80",fontWeight:700}}>{((p.m3/p.totalConso)*100).toFixed(1)}%</span>
+                    </div>}
+                    {p.m3>0 && p.priceM3>0 && <div style={{fontFamily:"system-ui",fontSize:12,color:"#a78bfa"}}>
+                      {fM3(p.m3)} × {p.priceM3.toFixed(5)} € = <strong>{fEUR(p.amount)}</strong>
+                    </div>}
+                  </div>
+                )}
+                {p.appelType==="assurance" && p.totalBill && (
+                  <div style={{fontFamily:"system-ui",fontSize:12}}>
+                    <span style={{color:"#64748b"}}>Cotisation totale : </span>
+                    <span style={{color:"#e2e8f0"}}>{fEUR(p.totalBill)}</span>
+                    <span style={{color:"#64748b"}}> ÷ parts égales = </span>
+                    <span style={{color:"#818cf8",fontWeight:700}}>{fEUR(p.amount)}</span>
+                  </div>
+                )}
+                {p.appelType==="autre" && p.totalBill && (
+                  <div style={{fontFamily:"system-ui",fontSize:12,color:"#94a3b8"}}>
+                    Montant affecté : <strong style={{color:"#e2e8f0"}}>{fEUR(p.amount)}</strong>
+                  </div>
+                )}
+              </div>
+
+              {/* Instructions virement */}
+              {copro.iban && (
+                <div style={{background:"#0a1e38",borderRadius:10,padding:"12px",border:"1px solid #2563eb44"}}>
+                  <div style={{fontFamily:"system-ui",fontSize:11,color:"#3b82f6",fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>📤 Virement à effectuer</div>
+                  <pre style={{fontFamily:"system-ui",fontSize:12,color:"#94a3b8",margin:0,whiteSpace:"pre-wrap"}}>{copro.iban}</pre>
+                  <div style={{background:"#1d4ed833",borderRadius:7,padding:"7px 10px",marginTop:8,fontFamily:"system-ui",fontSize:12}}>
+                    <span style={{color:"#64748b"}}>Référence obligatoire : </span>
+                    <span style={{color:"#f0f9ff",fontWeight:700,letterSpacing:0.5}}>{p.appelTitle} — {user.name}</span>
+                  </div>
+                  <div style={{fontFamily:"system-ui",fontSize:11,color:"#475569",marginTop:8,fontStyle:"italic"}}>
+                    ✉️ Le syndic confirmera la réception. Votre statut passera à "Payé".
+                  </div>
+                </div>
+              )}
+            </div>
+          ))}
+        </Sec>
+      )}
+
+      {!isSyndic && openReleves.length>0 && (
+        <Sec title="💧 Relevé à saisir">
+          {openReleves.map(a=>{
+            const r = (a.releves||[]).find(rv=>rv.ownerId===user.id);
+            return (
+              <div key={a.id} style={{...S.card,border:`1px solid ${r?"#166834":"#2563eb44"}`}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <div>
+                    <div style={{fontFamily:"system-ui",fontWeight:700,color:"#e2e8f0"}}>💧 {a.title}</div>
+                    <div style={{fontFamily:"system-ui",fontSize:12,color:"#64748b"}}>{fDATE(a.date)}{a.totalBill?` · Facture : ${fEUR(a.totalBill)}`:""}</div>
+                  </div>
+                  {r?<span style={{fontFamily:"system-ui",fontSize:12,color:"#4ade80",background:"#14532d33",padding:"4px 10px",borderRadius:20}}>✓ {fM3(r.m3)} m³ saisi</span>
+                    :<span style={{fontFamily:"system-ui",fontSize:12,color:"#f59e0b",background:"#f59e0b22",padding:"4px 10px",borderRadius:20}}>⏳ À saisir</span>}
+                </div>
+              </div>
+            );
+          })}
+        </Sec>
+      )}
+
+      {/* Historique des paiements du membre */}
+      {!isSyndic && (() => {
+        const myHistory = (copro.appels||[])
+          .filter(a=>a.status!=="open")
+          .flatMap(a=>(a.payments||[]).filter(p=>p.owner===user.id&&Number(p.amount)>0).map(p=>({...p,appelTitle:a.title,appelDate:a.date,appelType:a.type})))
+          .sort((a,b)=>new Date(b.appelDate)-new Date(a.appelDate));
+        const totalPaye = myHistory.filter(p=>p.paid).reduce((s,p)=>s+Number(p.amount),0);
+        const totalDu   = myHistory.reduce((s,p)=>s+Number(p.amount),0);
+        if (!myHistory.length) return null;
+        return (
+          <Sec title="📋 Mes charges">
+            <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,marginBottom:14}}>
+              <MK label="Total dû"   val={fEUR(totalDu)}   color="#60a5fa"/>
+              <MK label="Payé"       val={fEUR(totalPaye)} color="#4ade80"/>
+              <MK label="Restant"    val={fEUR(totalDu-totalPaye)} color={totalDu-totalPaye>0?"#f59e0b":"#4ade80"}/>
+            </div>
+            {myHistory.map((p,i)=>(
+              <div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 14px",background:S.card.background,borderRadius:10,marginBottom:6,borderLeft:`3px solid ${p.paid?"#4ade80":"#f59e0b"}`}}>
+                <div>
+                  <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:2}}>
+                    <span>{p.appelType==="eau"?"💧":p.appelType==="assurance"?"🛡️":"📁"}</span>
+                    <span style={{fontFamily:"system-ui",fontSize:13,fontWeight:600,color:"#e2e8f0"}}>{p.appelTitle}</span>
+                  </div>
+                  <div style={{fontFamily:"system-ui",fontSize:11,color:"#64748b"}}>
+                    {fDATE(p.appelDate)}
+                    {p.paid&&p.paidDate?` · Payé le ${fDATE(p.paidDate)}`:""}
+                    {p.m3>0?` · ${fM3(p.m3)} m³`:""}
+                  </div>
+                </div>
+                <div style={{textAlign:"right"}}>
+                  <div style={{fontFamily:"system-ui",fontSize:14,fontWeight:700,color:p.paid?"#4ade80":"#f59e0b"}}>{fEUR(p.amount)}</div>
+                  <div style={{fontFamily:"system-ui",fontSize:10,color:p.paid?"#4ade80":"#f59e0b"}}>{p.paid?"✓ Payé":"En attente"}</div>
+                </div>
+              </div>
+            ))}
+          </Sec>
+        );
+      })()}
+
+      {isSyndic && members.length>0 && (
+        <Sec title="👥 État des membres">
+          {members.map((m,i)=>{
+            const owed=(copro.appels||[]).flatMap(a=>(a.payments||[]).filter(p=>p.owner===m.id&&!p.paid)).reduce((s,p)=>s+Number(p.amount),0);
+            return (
+              <div key={m.id} style={{display:"flex",alignItems:"center",gap:12,padding:"11px 14px",background:i%2===0?S.card.background:"#0a1628",borderRadius:10,marginBottom:6}}>
+                <Av name={m.name} idx={i} size={36}/>
+                <div style={{flex:1}}>
+                  <div style={{fontFamily:"system-ui",fontSize:13,fontWeight:600,color:"#e2e8f0"}}>{m.name}</div>
+                  <div style={{fontFamily:"system-ui",fontSize:11,color:"#475569"}}>{m.type==="proprietaire"?"🏠":"🔑"} {m.role}</div>
+                </div>
+                {owed>0?<span style={{fontFamily:"system-ui",fontWeight:700,color:"#f59e0b",fontSize:13}}>Doit {fEUR(owed)}</span>
+                       :<span style={{fontFamily:"system-ui",fontSize:12,color:"#4ade80"}}>✓ À jour</span>}
+              </div>
+            );
+          })}
+        </Sec>
+      )}
+    </div>
+  );
+}
+
+// ─── Appels de fonds ──────────────────────────────────
+function AppelsTab({ copro, members, update }) {
+  const [show,  setShow]  = useState(false);
+  const [type,  setType]  = useState("eau");
+  const [title, setTitle] = useState("");
+  const [date,  setDate]  = useState(TODAY());
+  const [note,  setNote]  = useState("");
+  const [bill,  setBill]  = useState("");
+  const [invM3, setInvM3] = useState("");
+  const [mAmts, setMAmts] = useState({});
+
+  function handleBill(v) {
+    setBill(v);
+    if (copro.refPriceM3&&Number(copro.refPriceM3)>0&&v&&Number(v)>0)
+      setInvM3((Number(v)/Number(copro.refPriceM3)).toFixed(3));
+  }
+
+  const priceM3 = invM3&&bill&&Number(invM3)>0 ? Number(bill)/Number(invM3) : null;
+
+  const canCreate =
+    type==="eau"        ? (title.trim()&&bill&&Number(bill)>0) :
+    type==="assurance"  ? (title.trim()&&copro.assuranceAnnuelle&&Number(copro.assuranceAnnuelle)>0) :
+                          (title.trim()&&members.length>0&&members.every(m=>mAmts[m.id]&&!isNaN(Number(mAmts[m.id]))));
+
+  async function create() {
+    let ap = {id:uid(),title:title.trim(),date,note,type,status:"active",createdAt:new Date().toISOString()};
+    if (type==="eau") {
+      ap = {...ap,totalBill:Number(bill),invoiceM3:invM3?Number(invM3):null,priceM3,
+            status:"open",releves:[],
+            payments:(members||[]).map(m=>({owner:m.id,ownerName:m.name,amount:0,m3:0,paid:false,paidDate:null}))};
+    } else if (type==="assurance") {
+      const total=Number(copro.assuranceAnnuelle);
+      const shares=splitEqual(total,members.length);
+      ap={...ap,totalBill:total,payments:members.map((m,i)=>({owner:m.id,ownerName:m.name,amount:shares[i],paid:false,paidDate:null}))};
+    } else {
+      const pmts=members.map(m=>({owner:m.id,ownerName:m.name,amount:Number(mAmts[m.id]||0),paid:false,paidDate:null}));
+      ap={...ap,totalBill:pmts.reduce((s,p)=>s+p.amount,0),payments:pmts};
+    }
+    await update({appels:[ap,...(copro.appels||[])]});
+    setTitle(""); setBill(""); setInvM3(""); setNote(""); setMAmts({}); setShow(false);
+  }
+
+  async function validateReleves(id) {
+    const appels=(copro.appels||[]).map(a=>{
+      if (a.id!==id) return a;
+      const tc=a.releves.reduce((s,r)=>s+Number(r.m3),0);
+      if (!tc) return a;
+      const shares=splitByM3(a.releves.map(r=>r.m3),a.totalBill);
+      const pm3=a.invoiceM3?a.totalBill/a.invoiceM3:a.totalBill/tc;
+      const payments=a.releves.map((r,i)=>({owner:r.ownerId,ownerName:r.ownerName,amount:shares[i],m3:Number(r.m3),paid:false,paidDate:null}));
+      return {...a,payments,totalConso:tc,priceM3:pm3,status:"active"};
+    });
+    await update({appels});
+  }
+
+  async function togglePaid(appelId,ownerId) {
+    const appels=(copro.appels||[]).map(a=>{
+      if (a.id!==appelId) return a;
+      const payments=(a.payments||[]).map(p=>p.owner!==ownerId?p:{...p,paid:!p.paid,paidDate:!p.paid?new Date().toISOString():null});
+      return {...a,payments,status:payments.every(p=>p.paid)?"complete":"active"};
+    });
+    await update({appels});
+  }
+
+  async function delAppel(id) {
+    if (!confirm("Supprimer ?")) return;
+    await update({appels:(copro.appels||[]).filter(a=>a.id!==id)});
+  }
+
+  const sorted=[...(copro.appels||[])].sort((a,b)=>new Date(b.date)-new Date(a.date));
+
+  return (
+    <div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
+        <h2 style={S.h2}>Appels de fonds</h2>
+        <Btn small onClick={()=>setShow(!show)}>{show?"✕ Annuler":"+ Nouvel appel"}</Btn>
+      </div>
+
+      {members.length===0&&show&&(
+        <div style={{...S.card,border:"1px solid #f59e0b44",marginBottom:14}}>
+          <div style={{fontFamily:"system-ui",fontSize:13,color:"#fde68a"}}>⚠️ Aucun membre actif dans cette copropriété. Ajoutez d'abord des utilisateurs depuis l'espace Admin.</div>
+        </div>
+      )}
+
+      {show && (
+        <div style={S.card}>
+          <div style={{display:"flex",gap:8,marginBottom:18}}>
+            {[{id:"eau",l:"💧 Eau"},{id:"assurance",l:"🛡️ Assurance"},{id:"autre",l:"📁 Autre"}].map(t=>(
+              <button key={t.id} onClick={()=>setType(t.id)} style={{flex:1,padding:"9px 4px",borderRadius:10,border:`2px solid ${type===t.id?"#2563eb":"#1a3a5f"}`,background:type===t.id?"#1d4ed822":"transparent",color:type===t.id?"#7dd3fc":"#64748b",fontFamily:"system-ui",fontWeight:700,fontSize:13,cursor:"pointer"}}>{t.l}</button>
+            ))}
+          </div>
+
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
+            <FL label="Titre *"><FI value={title} onChange={setTitle} placeholder={type==="eau"?"Eau T2 2025":type==="assurance"?"Assurance 2025":"Libellé"}/></FL>
+            <FL label="Date"><input type="date" value={date} onChange={e=>setDate(e.target.value)} style={S.inp}/></FL>
+          </div>
+
+          {type==="eau" && <>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
+              <FL label="Montant TTC facture (€)"><NIn value={bill} onChange={handleBill} placeholder="0.00" unit="€"/></FL>
+              <FL label={copro.refPriceM3?"m³ (calculé auto)":"m³ facturés (selon facture)"}><NIn value={invM3} onChange={setInvM3} placeholder="0.000" unit="m³"/></FL>
+            </div>
+            {priceM3&&<div style={{fontFamily:"system-ui",fontSize:12,color:"#a78bfa",marginBottom:12}}>Prix exact : <strong>{priceM3.toFixed(5)} €/m³</strong></div>}
+            <div style={{background:"#060c16",borderRadius:10,padding:"11px 14px",border:"1px solid #1a3a5f44",fontFamily:"system-ui",fontSize:12,color:"#475569",marginBottom:14,lineHeight:1.6}}>
+              💡 Chaque membre saisira sa conso (m³) dans <strong style={{color:"#60a5fa"}}>Mon relevé</strong>. Vous validerez ensuite le calcul.
+            </div>
+          </>}
+
+          {type==="assurance" && <>
+            {copro.assuranceAnnuelle&&Number(copro.assuranceAnnuelle)>0
+              ? <div style={{background:"#0f0f2a",borderRadius:10,padding:"12px",border:"1px solid #818cf844",marginBottom:14}}>
+                  <div style={{fontFamily:"system-ui",fontSize:12,color:"#818cf8",fontWeight:700,marginBottom:8}}>Parts égales — {fEUR(Number(copro.assuranceAnnuelle))} total</div>
+                  {members.map((m,i)=>(
+                    <div key={i} style={{display:"flex",justifyContent:"space-between",fontFamily:"system-ui",fontSize:13,color:"#94a3b8",marginBottom:4}}>
+                      <span>{m.name}</span><span style={{color:"#4ade80",fontWeight:700}}>{fEUR(splitEqual(Number(copro.assuranceAnnuelle),members.length)[i])}</span>
+                    </div>
+                  ))}
+                </div>
+              : <Err>Renseignez d'abord la cotisation annuelle dans ⚙️ Paramètres.</Err>
+            }
+          </>}
+
+          {type==="autre" && members.map((m,i)=>(
+            <FL key={i} label={m.name}><NIn value={mAmts[m.id]||""} onChange={v=>setMAmts(p=>({...p,[m.id]:v}))} placeholder="0.00" unit="€"/></FL>
+          ))}
+
+          <FL label="Note (optionnel)"><FI value={note} onChange={setNote} placeholder="Référence facture…"/></FL>
+          <Btn disabled={!canCreate||members.length===0} onClick={create} full>Créer l'appel de fonds</Btn>
+        </div>
+      )}
+
+      {sorted.length===0&&!show&&<Empty>Aucun appel de fonds.</Empty>}
+
+      {sorted.map(a=>{
+        const tDu  =(a.payments||[]).reduce((s,p)=>s+Number(p.amount),0);
+        const tPay =(a.payments||[]).filter(p=>p.paid).reduce((s,p)=>s+Number(p.amount),0);
+        const allIn=(a.releves?.length||0)>=members.length&&members.length>0;
+        const bc   =a.status==="complete"?"#4ade80":a.status==="open"?"#f59e0b":"#3b82f6";
+        return (
+          <div key={a.id} style={{...S.card,marginBottom:14,borderLeft:`4px solid ${bc}`}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
+              <div>
+                <div style={{fontFamily:"system-ui",fontSize:14,fontWeight:700,color:"#f0f9ff"}}>
+                  {a.type==="eau"?"💧":a.type==="assurance"?"🛡️":"📁"} {a.title}
+                </div>
+                <div style={{fontFamily:"system-ui",fontSize:11,color:"#64748b",marginTop:2,display:"flex",gap:10,flexWrap:"wrap"}}>
+                  <span>{fDATE(a.date)}</span>
+                  {a.invoiceM3!=null&&<span style={{color:"#38bdf8"}}>{a.invoiceM3.toFixed(3)} m³</span>}
+                  {a.priceM3!=null&&<span style={{color:"#a78bfa"}}>{a.priceM3.toFixed(5)} €/m³</span>}
+                  {a.note&&<span>· {a.note}</span>}
+                </div>
+              </div>
+              <div style={{textAlign:"right",flexShrink:0}}>
+                <div style={{fontFamily:"system-ui",fontSize:13,fontWeight:700,color:a.status==="complete"?"#4ade80":"#60a5fa"}}>
+                  {a.status==="open"?"⏳ Relevés en cours":`${fEUR(tPay)} / ${fEUR(tDu)}`}
+                </div>
+                <SBadge status={a.status}/>
+              </div>
+            </div>
+
+            {a.type==="eau"&&a.status==="open"&&(
+              <div style={{background:"#060c16",borderRadius:10,padding:"12px",marginBottom:10,border:"1px solid #f59e0b33"}}>
+                <div style={{fontFamily:"system-ui",fontSize:12,fontWeight:700,color:"#f59e0b",marginBottom:8}}>Relevés reçus</div>
+                {members.map((m,i)=>{
+                  const r=(a.releves||[]).find(rv=>rv.ownerId===m.id);
+                  return <div key={i} style={{display:"flex",justifyContent:"space-between",fontFamily:"system-ui",fontSize:13,color:"#94a3b8",marginBottom:4}}>
+                    <span>{m.name}</span>
+                    {r?<span style={{color:"#4ade80"}}>✓ {fM3(r.m3)} m³</span>:<span style={{color:"#f59e0b"}}>En attente…</span>}
+                  </div>;
+                })}
+                {allIn&&<button onClick={()=>validateReleves(a.id)} style={{width:"100%",marginTop:10,padding:"9px",borderRadius:9,border:"none",background:"linear-gradient(135deg,#059669,#10b981)",color:"#fff",fontFamily:"system-ui",fontSize:13,fontWeight:700,cursor:"pointer"}}>✓ Valider et calculer les parts</button>}
+              </div>
+            )}
+
+            {a.status!=="open"&&tDu>0&&(
+              <div style={{height:5,background:"#1a3a5f",borderRadius:3,marginBottom:12,overflow:"hidden"}}>
+                <div style={{height:"100%",width:`${(tPay/tDu)*100}%`,background:"linear-gradient(90deg,#3b82f6,#4ade80)",borderRadius:3,transition:"width 0.4s"}}/>
+              </div>
+            )}
+
+            {a.status!=="open"&&(a.payments||[]).map((p,i)=>(
+              <div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"9px 12px",borderRadius:9,background:p.paid?"#14532d22":"#1a3a5f22",marginBottom:6,border:`1px solid ${p.paid?"#166834":"#1a3a5f"}`}}>
+                <div style={{display:"flex",gap:10,alignItems:"center"}}>
+                  <button onClick={()=>togglePaid(a.id,p.owner)} style={{width:26,height:26,borderRadius:7,border:`2px solid ${p.paid?"#4ade80":"#3b82f6"}`,background:p.paid?"#4ade80":"transparent",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,color:"#0a1628",flexShrink:0}}>{p.paid?"✓":""}</button>
+                  <div>
+                    <div style={{fontFamily:"system-ui",fontSize:13,color:p.paid?"#86efac":"#e2e8f0",fontWeight:600}}>{p.ownerName}</div>
+                    {a.type==="eau"&&p.m3>0&&<div style={{fontFamily:"system-ui",fontSize:11,color:"#38bdf8"}}>{fM3(p.m3)} m³ {a.priceM3&&<span style={{color:"#a78bfa"}}>· {fM3(p.m3)} × {a.priceM3.toFixed(5)} €</span>}</div>}
+                  </div>
+                </div>
+                <div style={{textAlign:"right"}}>
+                  <div style={{fontFamily:"system-ui",fontSize:15,fontWeight:700,color:p.paid?"#4ade80":"#f59e0b"}}>{fEUR(p.amount)}</div>
+                  {p.paid&&p.paidDate&&<div style={{fontFamily:"system-ui",fontSize:10,color:"#64748b"}}>{fDATE(p.paidDate)}</div>}
+                </div>
+              </div>
+            ))}
+            <div style={{textAlign:"right",marginTop:8}}>
+              <button onClick={()=>delAppel(a.id)} style={{background:"none",border:"none",color:"#334155",cursor:"pointer",fontSize:12,fontFamily:"system-ui"}}>🗑 Supprimer</button>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ─── Relevé (membre) ──────────────────────────────────
+function ReleveTab({ copro, user, update }) {
+  const openEau=(copro.appels||[]).filter(a=>a.type==="eau"&&a.status==="open");
+  const [vals,setVals]=useState({});
+  const members=(copro.users||[]).filter(u=>u.active&&u.id!=="__admin__");
+
+  async function submit(appelId,m3val) {
+    if (!m3val||Number(m3val)<=0) return;
+    const appels=(copro.appels||[]).map(a=>{
+      if (a.id!==appelId) return a;
+      const releves=[...(a.releves||[]).filter(r=>r.ownerId!==user.id),{ownerId:user.id,ownerName:user.name,m3:Number(m3val),enteredAt:new Date().toISOString()}];
+      return {...a,releves};
+    });
+    await update({appels});
+    setVals(p=>({...p,[appelId]:""}));
+  }
+
+  if (!openEau.length) return (
+    <div><h2 style={S.h2}>Mon relevé d'eau</h2>
+    <Empty>Aucun relevé à saisir.<br/>Le syndic vous contactera à la prochaine facture.</Empty></div>
+  );
+
+  return (
+    <div>
+      <h2 style={S.h2}>Mon relevé d'eau</h2>
+      {openEau.map(a=>{
+        const r=(a.releves||[]).find(rv=>rv.ownerId===user.id);
+        const total=(a.releves||[]).reduce((s,rv)=>s+rv.m3,0);
+        return (
+          <div key={a.id} style={{...S.card,border:`1px solid ${r?"#166834":"#2563eb44"}`}}>
+            <div style={{display:"flex",justifyContent:"space-between",marginBottom:16}}>
+              <div>
+                <div style={{fontFamily:"system-ui",fontSize:16,fontWeight:700,color:"#f0f9ff"}}>💧 {a.title}</div>
+                <div style={{fontFamily:"system-ui",fontSize:12,color:"#64748b"}}>{fDATE(a.date)}</div>
+                {a.totalBill&&<div style={{fontFamily:"system-ui",fontSize:13,color:"#f59e0b",fontWeight:600,marginTop:4}}>Facture : {fEUR(a.totalBill)}</div>}
+              </div>
+              <div style={{fontFamily:"system-ui",fontSize:12,color:"#64748b"}}>{(a.releves||[]).length}/{members.length} reçus</div>
+            </div>
+            {r?(
+              <div style={{background:"#14532d22",borderRadius:10,padding:"16px",border:"1px solid #166834",textAlign:"center"}}>
+                <div style={{fontSize:26,marginBottom:6}}>✓</div>
+                <div style={{fontFamily:"system-ui",fontSize:18,fontWeight:700,color:"#4ade80"}}>{fM3(r.m3)} m³</div>
+                <div style={{fontFamily:"system-ui",fontSize:12,color:"#64748b",marginTop:4}}>Saisi le {fDATE(r.enteredAt)}</div>
+                {a.totalBill&&total>0&&<div style={{fontFamily:"system-ui",fontSize:12,color:"#f59e0b",marginTop:8}}>Estimation : {fEUR((r.m3/total)*a.totalBill)}</div>}
+                <button onClick={()=>update({appels:(copro.appels||[]).map(x=>x.id!==a.id?x:{...x,releves:(x.releves||[]).filter(rv=>rv.ownerId!==user.id)})})}
+                  style={{marginTop:10,background:"none",border:"1px solid #1a3a5f",color:"#64748b",padding:"5px 14px",borderRadius:8,cursor:"pointer",fontFamily:"system-ui",fontSize:12}}>Modifier</button>
+              </div>
+            ):(
+              <FL label="Votre consommation (m³)">
+                <div style={{display:"flex",gap:10}}>
+                  <NIn value={vals[a.id]||""} onChange={v=>setVals(p=>({...p,[a.id]:v}))} placeholder="0.000" unit="m³"/>
+                  <Btn small disabled={!vals[a.id]||Number(vals[a.id])<=0} onClick={()=>submit(a.id,vals[a.id])}>Enregistrer</Btn>
+                </div>
+              </FL>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ─── Caisse ───────────────────────────────────────────
+function CaisseTab({ copro, balance, update }) {
+  const tIN =(copro.appels||[]).flatMap(a=>(a.payments||[]).filter(p=>p.paid)).reduce((s,p)=>s+Number(p.amount),0);
+  const tOUT=(copro.depenses||[]).reduce((s,d)=>s+Number(d.amount),0);
+  const pending=(copro.appels||[]).flatMap(a=>a.status!=="open"?(a.payments||[]).filter(p=>!p.paid).map(p=>({...p,appelTitle:a.title,appelId:a.id})):[]);
+  const events=[
+    ...(copro.appels||[]).flatMap(a=>(a.payments||[]).filter(p=>p.paid).map(p=>({date:p.paidDate,type:"in",label:`${p.ownerName} — ${a.title}`,amount:p.amount}))),
+    ...(copro.depenses||[]).map(d=>({date:d.date,type:"out",label:d.label,amount:d.amount})),
+  ].sort((a,b)=>new Date(b.date)-new Date(a.date)).slice(0,15);
+
+  async function confirm_(appelId,ownerId) {
+    const appels=(copro.appels||[]).map(a=>{
+      if (a.id!==appelId) return a;
+      const payments=(a.payments||[]).map(p=>p.owner!==ownerId?p:{...p,paid:true,paidDate:new Date().toISOString()});
+      return {...a,payments,status:payments.every(p=>p.paid)?"complete":"active"};
+    });
+    await update({appels});
+  }
+
+  return (
+    <div>
+      <h2 style={S.h2}>Caisse commune</h2>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:12,marginBottom:22}}>
+        <KPI icon="📥" label="Entrées" val={fEUR(tIN)}  color="#4ade80"/>
+        <KPI icon="📤" label="Sorties" val={fEUR(tOUT)} color="#f87171"/>
+        <KPI icon="💰" label="Solde"   val={fEUR(balance)} color={balance>=0?"#4ade80":"#f87171"}/>
+      </div>
+
+      {pending.length>0&&(
+        <Sec title={`⏳ Virements à confirmer (${pending.length})`}>
+          {pending.map((p,i)=>(
+            <div key={i} style={{...S.card,padding:"12px 16px",display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8,border:"1px solid #f59e0b33"}}>
+              <div>
+                <div style={{fontFamily:"system-ui",fontSize:13,fontWeight:600,color:"#fde68a"}}>{p.ownerName}</div>
+                <div style={{fontFamily:"system-ui",fontSize:12,color:"#64748b"}}>{p.appelTitle}</div>
+              </div>
+              <div style={{display:"flex",alignItems:"center",gap:12}}>
+                <span style={{fontFamily:"system-ui",fontWeight:700,color:"#f59e0b"}}>{fEUR(p.amount)}</span>
+                <button onClick={()=>confirm_(p.appelId,p.owner)} style={{padding:"6px 14px",borderRadius:9,border:"none",background:"linear-gradient(135deg,#059669,#10b981)",color:"#fff",fontFamily:"system-ui",fontSize:13,fontWeight:700,cursor:"pointer"}}>✓ Reçu</button>
+              </div>
+            </div>
+          ))}
+        </Sec>
+      )}
+
+      <Sec title="📜 Historique">
+        {!events.length?<Empty>Aucun mouvement.</Empty>:events.map((e,i)=>(
+          <div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 14px",background:S.card.background,borderRadius:10,marginBottom:6,borderLeft:`3px solid ${e.type==="in"?"#4ade80":"#f87171"}`}}>
+            <div>
+              <div style={{fontFamily:"system-ui",fontSize:13,color:"#e2e8f0"}}>{e.label}</div>
+              <div style={{fontFamily:"system-ui",fontSize:11,color:"#64748b"}}>{fDATE(e.date)}</div>
+            </div>
+            <span style={{fontFamily:"system-ui",fontWeight:700,color:e.type==="in"?"#4ade80":"#f87171"}}>{e.type==="in"?"+":"-"}{fEUR(e.amount)}</span>
+          </div>
+        ))}
+      </Sec>
+    </div>
+  );
+}
+
+// ─── Dépenses ─────────────────────────────────────────
+function DepensesTab({ copro, update }) {
+  const [show,setShow]=useState(false);
+  const [label,setLabel]=useState(""); const [amount,setAmount]=useState(""); const [cat,setCat]=useState("Eau");
+  const [date,setDate]=useState(TODAY()); const [note,setNote]=useState("");
+  const CATS=["Eau","Assurance","Charges communes","Travaux","Autre"];
+  const ICONS={Eau:"💧",Assurance:"🛡️","Charges communes":"🏢",Travaux:"🔧",Autre:"📁"};
+
+  async function add() {
+    if (!label.trim()||!amount) return;
+    await update({depenses:[{id:uid(),label:label.trim(),amount:Number(amount),category:cat,date,note},...(copro.depenses||[])]});
+    setLabel(""); setAmount(""); setNote(""); setShow(false);
+  }
+
+  const sorted=[...(copro.depenses||[])].sort((a,b)=>new Date(b.date)-new Date(a.date));
+  const byCat=CATS.map(c=>({c,t:(copro.depenses||[]).filter(d=>d.category===c).reduce((s,d)=>s+Number(d.amount),0)})).filter(x=>x.t>0);
+
+  return (
+    <div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
+        <h2 style={S.h2}>Dépenses</h2>
+        <Btn small onClick={()=>setShow(!show)}>{show?"✕ Annuler":"+ Ajouter"}</Btn>
+      </div>
+      {byCat.length>0&&<div style={{display:"flex",gap:10,flexWrap:"wrap",marginBottom:18}}>
+        {byCat.map(({c,t})=>(
+          <div key={c} style={{background:S.card.background,borderRadius:10,padding:"10px 14px",border:"1px solid #1a3a5f"}}>
+            <div style={{fontSize:18}}>{ICONS[c]}</div>
+            <div style={{fontFamily:"system-ui",fontSize:11,color:"#64748b"}}>{c}</div>
+            <div style={{fontFamily:"system-ui",fontSize:14,fontWeight:700,color:"#f87171"}}>{fEUR(t)}</div>
+          </div>
+        ))}
+      </div>}
+      {show&&(
+        <div style={S.card}>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
+            <FL label="Catégorie"><select value={cat} onChange={e=>setCat(e.target.value)} style={S.inp}>{CATS.map(c=><option key={c}>{c}</option>)}</select></FL>
+            <FL label="Date"><input type="date" value={date} onChange={e=>setDate(e.target.value)} style={S.inp}/></FL>
+            <FL label="Libellé"><FI value={label} onChange={setLabel} placeholder="Ex: Facture Véolia"/></FL>
+            <FL label="Montant"><NIn value={amount} onChange={setAmount} placeholder="0.00" unit="€"/></FL>
+          </div>
+          <FL label="Note"><FI value={note} onChange={setNote} placeholder="Optionnel"/></FL>
+          <Btn onClick={add} full>Enregistrer</Btn>
+        </div>
+      )}
+      {!sorted.length&&!show&&<Empty>Aucune dépense.</Empty>}
+      {sorted.map(d=>(
+        <div key={d.id} style={{...S.card,padding:"11px 14px",display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+          <div style={{display:"flex",gap:10,alignItems:"center"}}>
+            <span style={{fontSize:20}}>{ICONS[d.category]||"📁"}</span>
+            <div>
+              <div style={{fontFamily:"system-ui",fontSize:13,color:"#e2e8f0",fontWeight:600}}>{d.label}</div>
+              <div style={{fontFamily:"system-ui",fontSize:11,color:"#64748b"}}>{d.category} · {fDATE(d.date)}{d.note&&` · ${d.note}`}</div>
+            </div>
+          </div>
+          <div style={{display:"flex",alignItems:"center",gap:12}}>
+            <span style={{fontFamily:"system-ui",fontWeight:700,color:"#f87171"}}>−{fEUR(d.amount)}</span>
+            <button onClick={async()=>await update({depenses:(copro.depenses||[]).filter(x=>x.id!==d.id)})} style={{background:"none",border:"none",color:"#334155",cursor:"pointer",fontSize:14}}>🗑</button>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ─── Paramètres copro ─────────────────────────────────
+function ParamsTab({ copro, update }) {
+  const [form,setForm]=useState({iban:copro.iban||"",refPriceM3:copro.refPriceM3||"",assuranceAnnuelle:copro.assuranceAnnuelle||""});
+  const [ok,setOk]=useState(false);
+  const [fetchSt,setFetchSt]=useState("idle");
+  const [fetchR,setFetchR]=useState(null);
+
+  async function autoFetch() {
+    setFetchSt("loading"); setFetchR(null);
+    try {
+      const res=await fetch("https://api.anthropic.com/v1/messages",{
+        method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({
+          model:"claude-sonnet-4-20250514",max_tokens:512,
+          tools:[{type:"web_search_20250305",name:"web_search"}],
+          system:`Prix m³ eau TTC Marseille SEM 2025. JSON uniquement: {"prix_m3":<float>,"source":"<string>","annee":<int>}`,
+          messages:[{role:"user",content:"Prix m³ eau potable TTC Marseille 2025 Eaux de Marseille. JSON."}]
+        })
+      });
+      const data=await res.json();
+      const text=(data.content||[]).filter(b=>b.type==="text").map(b=>b.text).join("");
+      const m=text.match(/\{[^{}]+\}/);
+      if (m) {
+        const r=JSON.parse(m[0]);
+        if (r.prix_m3) { setForm(p=>({...p,refPriceM3:String(r.prix_m3)})); setFetchR(r); setFetchSt("ok"); }
+        else { setFetchSt("error"); }
+      } else setFetchSt("error");
+    } catch { setFetchSt("error"); }
+  }
+
+  async function saveParams() {
+    await update({iban:form.iban,refPriceM3:form.refPriceM3,assuranceAnnuelle:form.assuranceAnnuelle});
+    setOk(true); setTimeout(()=>setOk(false),2000);
+  }
+
+  return (
+    <div style={{maxWidth:520}}>
+      <h2 style={S.h2}>Paramètres</h2>
+      <div style={S.card}>
+        <div style={{fontFamily:"system-ui",fontSize:13,fontWeight:700,color:"#4ade80",marginBottom:10}}>🏦 Compte bancaire</div>
+        <div style={{fontFamily:"system-ui",fontSize:12,color:"#475569",marginBottom:12}}>Affiché aux membres pour leurs virements.</div>
+        <textarea value={form.iban} onChange={e=>setForm(p=>({...p,iban:e.target.value}))}
+          placeholder={"FR76 XXXX XXXX XXXX XXXX XXXX XXX\nTitulaire : …"} style={{...S.inp,height:68,resize:"vertical"}}/>
+      </div>
+      <div style={S.card}>
+        <div style={{fontFamily:"system-ui",fontSize:13,fontWeight:700,color:"#38bdf8",marginBottom:6}}>💧 Tarif Eaux de Marseille</div>
+        <div style={{fontFamily:"system-ui",fontSize:12,color:"#475569",marginBottom:12,lineHeight:1.6}}>
+          Prix m³ TTC → les m³ se calculent <strong style={{color:"#4ade80"}}>automatiquement</strong> dès que vous saisissez le montant TTC.
+        </div>
+        <div style={{display:"flex",gap:10,marginBottom:10}}>
+          <NIn value={form.refPriceM3} onChange={v=>setForm(p=>({...p,refPriceM3:v}))} placeholder="ex: 3.78500" unit="€/m³"/>
+          <button onClick={autoFetch} disabled={fetchSt==="loading"} style={{padding:"0 14px",borderRadius:10,border:"1px solid #1a3a5f",background:S.card.background,color:"#60a5fa",fontFamily:"system-ui",fontSize:13,fontWeight:600,cursor:"pointer",whiteSpace:"nowrap"}}>
+            {fetchSt==="loading"?"⏳…":"🤖 Auto-fetch"}
+          </button>
+        </div>
+        {fetchSt==="ok"&&fetchR&&<div style={{fontFamily:"system-ui",fontSize:12,color:"#4ade80",marginBottom:8}}>✓ {fetchR.prix_m3} €/m³ ({fetchR.annee})</div>}
+        {fetchSt==="error"&&<div style={{fontFamily:"system-ui",fontSize:12,color:"#fca5a5",marginBottom:8}}>Non trouvé. Saisissez manuellement depuis votre facture.</div>}
+        {form.refPriceM3&&Number(form.refPriceM3)>0&&<div style={{fontFamily:"system-ui",fontSize:12,color:"#64748b"}}>Ex: 200 € TTC = <strong style={{color:"#38bdf8"}}>{(200/Number(form.refPriceM3)).toFixed(3)} m³</strong></div>}
+      </div>
+      <div style={S.card}>
+        <div style={{fontFamily:"system-ui",fontSize:13,fontWeight:700,color:"#818cf8",marginBottom:6}}>🛡️ Assurance copropriété</div>
+        <div style={{fontFamily:"system-ui",fontSize:12,color:"#475569",marginBottom:12}}>Cotisation annuelle — répartie à parts égales.</div>
+        <NIn value={form.assuranceAnnuelle} onChange={v=>setForm(p=>({...p,assuranceAnnuelle:v}))} placeholder="ex: 480.00" unit="€"/>
+      </div>
+      <Btn onClick={saveParams} full>{ok?"✓ Sauvegardé !":"Enregistrer les paramètres"}</Btn>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════
+//  MICRO COMPOSANTS
+// ═══════════════════════════════════════════════════════
+const FL  = ({label,children}) => <div style={{marginBottom:14}}><label style={S.lbl}>{label}</label>{children}</div>;
+const FI  = ({value,onChange,placeholder,type="text",onKey,autoFocus}) => (
+  <input type={type} value={value} onChange={e=>onChange(e.target.value)} placeholder={placeholder}
+    onKeyDown={onKey} autoFocus={autoFocus} autoComplete="off" style={S.inp}/>
+);
+const NIn = ({value,onChange,placeholder,unit}) => (
+  <div style={{position:"relative"}}>
+    <input type="number" min="0" step="any" value={value} onChange={e=>onChange(e.target.value)}
+      placeholder={placeholder} style={{...S.inp,paddingRight:unit.length>1?54:38}}/>
+    <span style={{position:"absolute",right:12,top:"50%",transform:"translateY(-50%)",color:unit==="m³"?"#38bdf8":"#64748b",fontFamily:"system-ui",fontSize:12,fontWeight:700}}>{unit}</span>
+  </div>
+);
+const Btn = ({children,onClick,disabled,small,full,style={}}) => (
+  <button onClick={onClick} disabled={disabled} style={{padding:small?"8px 16px":"11px 22px",borderRadius:10,border:"none",background:disabled?"#1e3a5f":"linear-gradient(135deg,#1d4ed8,#3b82f6)",color:disabled?"#475569":"#fff",fontSize:small?13:14,fontWeight:700,cursor:disabled?"not-allowed":"pointer",fontFamily:"system-ui",width:full?"100%":undefined,...style}}>
+    {children}
+  </button>
+);
+const SecBtn = ({children,onClick}) => <button onClick={onClick} style={{padding:"11px 20px",borderRadius:10,border:"1px solid #1a3a5f",background:"#0a1628",color:"#94a3b8",fontSize:14,fontWeight:600,cursor:"pointer",fontFamily:"system-ui"}}>{children}</button>;
+const SmBtn  = ({children,onClick,danger}) => <button onClick={onClick} style={{padding:"6px 12px",borderRadius:8,border:`1px solid ${danger?"#7f1d1d":"#1a3a5f"}`,background:danger?"#7f1d1d22":"transparent",color:danger?"#fca5a5":"#94a3b8",fontSize:12,fontWeight:600,cursor:"pointer",fontFamily:"system-ui"}}>{children}</button>;
+const IBtn   = ({children,onClick,title,danger}) => <button onClick={onClick} title={title} style={{padding:"5px 8px",borderRadius:7,border:"none",background:"transparent",cursor:"pointer",fontSize:14,color:danger?"#f87171":"#64748b"}}>{children}</button>;
+const Err    = ({children}) => <div style={{background:"#450a0a",borderRadius:9,padding:"9px 13px",border:"1px solid #7f1d1d",fontFamily:"system-ui",fontSize:13,color:"#fca5a5",marginBottom:14}}>⚠️ {children}</div>;
+const Empty  = ({children}) => <div style={{textAlign:"center",color:"#334155",fontFamily:"system-ui",padding:"40px 20px",fontSize:14,lineHeight:1.8}}>{children}</div>;
+const Av     = ({name,idx,size=40}) => <div style={{width:size,height:size,borderRadius:"50%",background:`hsl(${(idx*137)%360},40%,30%)`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:size*0.42,fontWeight:700,flexShrink:0,color:"#fff",fontFamily:"system-ui"}}>{name[0].toUpperCase()}</div>;
+const Tag    = ({color,children}) => <span style={{fontFamily:"system-ui",fontSize:11,color,background:color+"22",padding:"2px 9px",borderRadius:20,fontWeight:600}}>{children}</span>;
+const KPI    = ({icon,label,val,color}) => <div style={{...S.card,textAlign:"center",padding:"14px"}}><div style={{fontSize:22,marginBottom:4}}>{icon}</div><div style={{fontFamily:"Georgia,serif",fontSize:22,fontWeight:700,color}}>{val}</div><div style={{fontFamily:"system-ui",fontSize:11,color:"#475569",marginTop:2}}>{label}</div></div>;
+const MK     = ({label,val,color}) => <div style={{background:"#060c16",borderRadius:10,padding:"10px",textAlign:"center"}}><div style={{fontFamily:"system-ui",fontSize:10,color:"#475569",textTransform:"uppercase",letterSpacing:1,marginBottom:4}}>{label}</div><div style={{fontFamily:"Georgia,serif",fontSize:16,fontWeight:700,color}}>{val}</div></div>;
+const Sec    = ({title,children}) => <div style={{marginBottom:22}}><div style={{fontSize:11,fontFamily:"system-ui",fontWeight:700,color:"#334155",letterSpacing:1.5,textTransform:"uppercase",marginBottom:10}}>{title}</div>{children}</div>;
+const SBadge = ({status}) => { const m={open:["#f59e0b","En attente"],active:["#60a5fa","En cours"],complete:["#4ade80","Complet"]}; const [c,l]=m[status]||["#64748b","?"]; return <span style={{fontFamily:"system-ui",fontSize:11,color:c,background:c+"22",padding:"2px 8px",borderRadius:20,display:"inline-block",marginTop:3}}>{l}</span>; };
+
+// ─── DataStatusBar ────────────────────────────────────
+function DataStatusBar({ lastSaved, db, onExport }) {
+  const [age, setAge] = useState(0);
+  const [lsOk, setLsOk] = useState(false);
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(LS_PRIMARY);
+      if (raw) { const d=JSON.parse(raw); setLsOk(d?.superAdmin!=null); }
+    } catch {}
+  }, [lastSaved]);
+
+  useEffect(() => {
+    if (!lastSaved) return;
+    const t = setInterval(() => setAge(Math.round((Date.now()-lastSaved)/1000)), 3000);
+    return () => clearInterval(t);
+  }, [lastSaved]);
+
+  const nb_copros = db?.copros?.length || 0;
+  const nb_users  = db?.copros?.reduce((s,c)=>s+(c.users||[]).length,0) || 0;
+  const nb_appels = db?.copros?.reduce((s,c)=>s+(c.appels||[]).length,0) || 0;
+
+  return (
+    <div style={{background:"#060c16",borderBottom:"1px solid #1a3a5f22",padding:"6px 22px",display:"flex",alignItems:"center",gap:16,flexWrap:"wrap"}}>
+      {/* Statut local */}
+      <div style={{display:"flex",alignItems:"center",gap:6,fontFamily:"system-ui",fontSize:11}}>
+        <span style={{width:7,height:7,borderRadius:"50%",background:lsOk?"#4ade80":"#f87171",display:"inline-block"}}/>
+        <span style={{color:lsOk?"#4ade80":"#f87171",fontWeight:700}}>
+          {lsOk?"Local sécurisé":"⚠️ Vérification…"}
+        </span>
+        {lastSaved&&<span style={{color:"#334155"}}>· {age<5?"à l'instant":age<60?`il y a ${age}s`:`il y a ${Math.round(age/60)}min`}</span>}
+      </div>
+
+      {/* Statut Firebase */}
+      <div style={{display:"flex",alignItems:"center",gap:6,fontFamily:"system-ui",fontSize:11}}>
+        <span style={{width:7,height:7,borderRadius:"50%",background:"#60a5fa",display:"inline-block",animation:"pulse 2s infinite"}}/>
+        <span style={{color:"#60a5fa",fontWeight:700}}>☁️ Sync Firebase active</span>
+        <style>{`@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}`}</style>
+      </div>
+
+      {/* Résumé */}
+      <div style={{display:"flex",gap:12,fontFamily:"system-ui",fontSize:11,color:"#334155"}}>
+        <span>🏢 {nb_copros} copro{nb_copros!==1?"s":""}</span>
+        <span>👥 {nb_users} user{nb_users!==1?"s":""}</span>
+        <span>📢 {nb_appels} appel{nb_appels!==1?"s":""}</span>
+      </div>
+
+      <button onClick={onExport} style={{marginLeft:"auto",background:"none",border:"1px solid #1a3a5f",color:"#475569",padding:"3px 10px",borderRadius:6,cursor:"pointer",fontFamily:"system-ui",fontSize:11}}>
+        ↓ Copie locale (.json)
+      </button>
+    </div>
+  );
+}
+
+// ─── SaveBadge ────────────────────────────────────────
+function SaveBadge({ lastSaved }) {
+  const [label, setLabel] = useState("✅ Sauvegardé");
+  useEffect(() => {
+    if (!lastSaved) return;
+    function update() {
+      const diff = Math.round((Date.now() - lastSaved) / 1000);
+      if (diff < 5)        setLabel("✅ Sauvegardé à l'instant");
+      else if (diff < 60)  setLabel(`✅ Sauvegardé il y a ${diff}s`);
+      else if (diff < 120) setLabel("✅ Sauvegardé il y a 1 min");
+      else                 setLabel(`✅ Sauvegardé il y a ${Math.round(diff/60)} min`);
+    }
+    update();
+    const t = setInterval(update, 5000);
+    return () => clearInterval(t);
+  }, [lastSaved]);
+  if (!lastSaved) return null;
+  return (
+    <span style={{fontFamily:"system-ui",fontSize:11,color:"#4ade80",background:"#14532d33",padding:"4px 10px",borderRadius:20,whiteSpace:"nowrap"}}>
+      {label}
+    </span>
+  );
+}
+
+// ─── Design tokens ────────────────────────────────────
+const S = {
+  root:   {minHeight:"100vh",background:"#07090f",color:"#e2e8f0"},
+  header: {background:"linear-gradient(135deg,#0d1e38,#09121f)",borderBottom:"1px solid #1a3a5f33",padding:"14px 22px",display:"flex",justifyContent:"space-between",alignItems:"center"},
+  eyebrow:{fontSize:10,letterSpacing:4,color:"#3b82f6",textTransform:"uppercase",fontFamily:"system-ui",fontWeight:700},
+  title:  {fontSize:18,fontWeight:700,color:"#f0f9ff",fontFamily:"Georgia,serif"},
+  tabBar: {display:"flex",gap:2,background:"#050810",padding:"8px 16px",borderBottom:"1px solid #1a3a5f22",overflowX:"auto"},
+  tabBtn: {padding:"7px 15px",borderRadius:8,border:"none",cursor:"pointer",whiteSpace:"nowrap",fontFamily:"system-ui",fontSize:12,fontWeight:600,background:"transparent",color:"#475569"},
+  tabAct: {background:"#1d4ed8",color:"#fff"},
+  main:   {maxWidth:860,margin:"0 auto",padding:"22px 16px"},
+  card:   {background:"#0c1829",borderRadius:14,padding:"18px",border:"1px solid #1a3a5f33",marginBottom:12},
+  inp:    {width:"100%",padding:"10px 14px",borderRadius:9,border:"1px solid #1a3a5f",background:"#060c16",color:"#e2e8f0",fontSize:14,fontFamily:"system-ui",outline:"none",boxSizing:"border-box"},
+  lbl:    {display:"block",fontSize:11,color:"#3b82f6",fontFamily:"system-ui",fontWeight:700,letterSpacing:1,textTransform:"uppercase",marginBottom:6},
+  h2:     {margin:"0 0 20px",fontSize:19,color:"#f0f9ff",fontFamily:"Georgia,serif"},
+};
+
+
+    const root = ReactDOM.createRoot(document.getElementById("root"));
+    root.render(React.createElement(App));
+  </script>
+</body>
+</html>
