@@ -6,20 +6,16 @@
   <title>CoproManager</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { background: #07090f; font-family: Georgia, serif; }
+    body { background: #07090f; }
     #root { min-height: 100vh; }
     input, select, textarea, button { font-family: system-ui, sans-serif; }
   </style>
 </head>
 <body>
   <div id="root"></div>
-
-  <!-- React -->
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-  <!-- Babel (transpile JSX en live) -->
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-
   <script type="text/babel" data-presets="react">
 const { useState, useEffect, useRef, useCallback } = React;
 
@@ -33,7 +29,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const FIREBASE_CONFIG = {
   apiKey:            "AIzaSyABWFCesKWCftwhUHm9zzfvW-ef-rTVWrY",
   authDomain:        "copro-manager13.firebaseapp.com",
-  databaseURL:       "https://copro-manager13-default-rtdb.firebaseio.com",
+  databaseURL:       "https://copro-manager13-default-rtdb.europe-west1.firebasedatabase.app",
   projectId:         "copro-manager13",
   storageBucket:     "copro-manager13.firebasestorage.app",
   messagingSenderId: "850361891714",
@@ -1665,7 +1661,6 @@ const S = {
   lbl:    {display:"block",fontSize:11,color:"#3b82f6",fontFamily:"system-ui",fontWeight:700,letterSpacing:1,textTransform:"uppercase",marginBottom:6},
   h2:     {margin:"0 0 20px",fontSize:19,color:"#f0f9ff",fontFamily:"Georgia,serif"},
 };
-
 
     const root = ReactDOM.createRoot(document.getElementById("root"));
     root.render(React.createElement(App));
