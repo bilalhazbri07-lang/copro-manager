@@ -5,43 +5,24 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>CoproManager</title>
   <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { background: #07090f; color: #e2e8f0; }
-    #root { min-height: 100vh; }
-    input, select, textarea, button { font-family: system-ui, sans-serif; }
-    #loading {
-      display: flex; align-items: center; justify-content: center;
-      height: 100vh; flex-direction: column; gap: 16px;
-      font-family: Georgia, serif; color: #3b82f6; font-size: 18px;
-    }
-    .spinner {
-      width: 40px; height: 40px; border: 3px solid #1a3a5f;
-      border-top-color: #3b82f6; border-radius: 50%;
-      animation: spin 0.8s linear infinite;
-    }
-    @keyframes spin { to { transform: rotate(360deg); } }
+    * { box-sizing:border-box; margin:0; padding:0; }
+    body { background:#07090f; }
+    #root { min-height:100vh; }
+    input,select,textarea,button { font-family:system-ui,sans-serif; }
+    #splash { display:flex; align-items:center; justify-content:center; height:100vh;
+      flex-direction:column; gap:14px; font-family:Georgia,serif; color:#3b82f6; font-size:18px; }
+    .sp { width:38px; height:38px; border:3px solid #1a3a5f;
+      border-top-color:#3b82f6; border-radius:50%; animation:sp 0.8s linear infinite; }
+    @keyframes sp { to { transform:rotate(360deg); } }
   </style>
 </head>
 <body>
-  <div id="loading">
-    <div class="spinner"></div>
-    <div>Chargement de CoproManager…</div>
-  </div>
+  <div id="splash"><div class="sp"></div><div>Chargement…</div></div>
   <div id="root" style="display:none"></div>
-
   <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone@7.23.5/babel.min.js"></script>
-
-  <script>
-    // Hide loading, show app once React renders
-    window.__showApp = function() {
-      document.getElementById('loading').style.display = 'none';
-      document.getElementById('root').style.display = 'block';
-    };
-  </script>
-
-  <script type="text/babel" data-presets="react,env" data-plugins="transform-class-properties">
+  <script type="text/babel" data-presets="react">
 const { useState, useEffect, useRef, useCallback } = React;
 
 // ═══════════════════════════════════════════════════════
@@ -670,8 +651,8 @@ function UsersTab({ copro, db, persist, onBack }) {
   const [err,  setErr]    = useState("");
   const [search, setSearch] = useState("");
 
-  function openCreate() { setEdit(null); setForm({name:"",login:"",password:"",role:"membre",type:"proprietaire",active:true}); setShowForm(true); setErr(""); }
-  function openEdit(u)  { setEdit(u); setForm({...u,password:""}); setShowForm(true); setErr(""); }
+  function openCreate() { setEdit(null); setForm({name:"",login:"",password:"",role:"membre",type:"proprietaire",active:true,lastIndex:""}); setShowForm(true); setErr(""); }
+  function openEdit(u)  { setEdit(u); setForm({...u,password:"",lastIndex:u.lastIndex||""}); setShowForm(true); setErr(""); }
 
   async function saveUser() {
     setErr("");
@@ -686,9 +667,16 @@ function UsersTab({ copro, db, persist, onBack }) {
     if (edit) {
       user = {...edit,name:form.name.trim(),login:loginLc,role:form.role,type:form.type,active:form.active};
       if (form.password) user.password = hash(form.password);
+      // Index : seul l'admin peut le modifier — on garde la valeur du form
+      if (form.lastIndex !== undefined && form.lastIndex !== "") {
+        user.lastIndex = Number(form.lastIndex);
+      }
     } else {
       if (!form.password||form.password.length<4) { setErr("Mot de passe min. 4 caractères."); return; }
       user = {id:uid(),name:form.name.trim(),login:loginLc,password:hash(form.password),role:form.role,type:form.type,active:true};
+      if (form.lastIndex !== undefined && form.lastIndex !== "") {
+        user.lastIndex = Number(form.lastIndex);
+      }
     }
 
     const users = edit ? copro.users.map(u=>u.id===edit.id?user:u) : [...(copro.users||[]),user];
@@ -769,6 +757,32 @@ function UsersTab({ copro, db, persist, onBack }) {
               </FL>
             )}
           </div>
+          {/* Index compteur — admin protégé */}
+          <div style={{background:"#07090f",borderRadius:10,padding:"14px",border:"1px solid #f59e0b44",marginTop:8,marginBottom:8}}>
+            <div style={{fontFamily:"system-ui",fontSize:12,fontWeight:700,color:"#f59e0b",marginBottom:10}}>
+              🔒 Index compteur eau (admin uniquement)
+            </div>
+            <FL label="Index de base — relevé initial ou actuel (m³)">
+              <div style={{position:"relative"}}>
+                <input type="number" min="0" step="0.001"
+                  value={form.lastIndex ?? ""}
+                  onChange={e=>setForm(p=>({...p,lastIndex:e.target.value}))}
+                  placeholder="ex: 1535.250"
+                  style={{...S.inp,paddingRight:42}}/>
+                <span style={{position:"absolute",right:12,top:"50%",transform:"translateY(-50%)",color:"#38bdf8",fontFamily:"system-ui",fontSize:12,fontWeight:700}}>m³</span>
+              </div>
+            </FL>
+            {edit?.lastIndex && (
+              <div style={{fontFamily:"system-ui",fontSize:12,color:"#38bdf8",marginTop:4}}>
+                Index enregistré actuellement : <strong>{Number(edit.lastIndex).toFixed(3)} m³</strong>
+              </div>
+            )}
+            <div style={{fontFamily:"system-ui",fontSize:11,color:"#475569",marginTop:8,lineHeight:1.5}}>
+              ⚠️ Seul l'administrateur peut modifier cet index. Le propriétaire ne peut que le consulter.
+              Il sert de base pour calculer la consommation lors du prochain relevé.
+            </div>
+          </div>
+
           {err && <Err>{err}</Err>}
           <div style={{display:"flex",gap:10,marginTop:6}}>
             <SecBtn onClick={()=>setShowForm(false)}>Annuler</SecBtn>
@@ -914,113 +928,164 @@ function CoproApp({ copro, user, onPersistCopro, onLogout, onBackAdmin, onExport
   );
 }
 
-// ─── Saisie inline du relevé (depuis le dashboard) ───────
+// ─── Saisie de l'index compteur (depuis le dashboard) ────
 function InlineReleveForm({ appels, user, copro, update }) {
   const [vals, setVals] = useState({});
-  const [saved, setSaved] = useState({});
 
-  async function submit(appelId, m3val) {
-    if (!m3val || Number(m3val) <= 0) return;
+  // Récupère l'index précédent de l'utilisateur
+  function getLastIndex(userId) {
+    const user = (copro.users||[]).find(u=>u.id===userId);
+    return user?.lastIndex || null;
+  }
+
+  async function submit(appelId, currentIndex) {
+    const idx = Number(currentIndex);
+    if (!idx || idx <= 0) return;
+    const lastIdx = getLastIndex(user.id);
+    const conso = lastIdx ? Math.max(0, idx - lastIdx) : idx;
+
     const newAppels = (copro.appels||[]).map(a => {
       if (a.id !== appelId) return a;
-      const releves = [...(a.releves||[]).filter(r=>r.ownerId!==user.id),
-        { ownerId:user.id, ownerName:user.name, m3:Number(m3val), enteredAt:new Date().toISOString() }];
+      const releves = [...(a.releves||[]).filter(r=>r.ownerId!==user.id), {
+        ownerId: user.id,
+        ownerName: user.name,
+        currentIndex: idx,
+        lastIndex: lastIdx,
+        m3: conso,
+        enteredAt: new Date().toISOString()
+      }];
       return { ...a, releves };
     });
-    await update({ appels: newAppels });
-    setSaved(p => ({ ...p, [appelId]: true }));
+
+    // Mettre à jour l'index dans le profil utilisateur
+    const newUsers = (copro.users||[]).map(u =>
+      u.id === user.id ? { ...u, lastIndex: idx } : u
+    );
+
+    await update({ appels: newAppels, users: newUsers });
     setVals(p => ({ ...p, [appelId]: "" }));
   }
 
   return (
-    <Sec title="💧 Relevé d'eau à saisir">
+    <Sec title="💧 Facture eau — Saisissez votre index">
       {appels.map(a => {
         const r = (a.releves||[]).find(rv => rv.ownerId === user.id);
-        const total = (a.releves||[]).reduce((s,rv) => s + rv.m3, 0);
-        const isSaved = saved[a.id] || !!r;
+        const lastIdx = getLastIndex(user.id);
+        const currentVal = vals[a.id] || "";
+        const previewConso = currentVal && lastIdx ? Math.max(0, Number(currentVal) - lastIdx) : currentVal ? Number(currentVal) : null;
+        const pm3 = a.priceM3 || (copro.refPriceM3 ? Number(copro.refPriceM3) : null);
+        const previewEur = previewConso && pm3 ? previewConso * pm3 : null;
+
         return (
-          <div key={a.id} style={{ ...S.card, border:`1px solid ${isSaved?"#166834":"#f59e0b55"}`, marginBottom:12 }}>
+          <div key={a.id} style={{ ...S.card, border:`1px solid ${r?"#166834":"#f59e0b55"}` }}>
             {/* En-tête */}
-            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:14 }}>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:16 }}>
               <div>
-                <div style={{ fontFamily:"system-ui", fontSize:15, fontWeight:700, color:"#f0f9ff" }}>
-                  💧 {a.title}
-                </div>
+                <div style={{ fontFamily:"system-ui", fontSize:15, fontWeight:700, color:"#f0f9ff" }}>💧 {a.title}</div>
                 <div style={{ fontFamily:"system-ui", fontSize:12, color:"#64748b", marginTop:3 }}>
                   {fDATE(a.date)}
-                  {a.totalBill && <span style={{color:"#f59e0b", marginLeft:8}}>Facture : {fEUR(a.totalBill)}</span>}
+                  {a.totalBill && <span style={{color:"#f59e0b",marginLeft:8}}>Facture totale : {fEUR(a.totalBill)}</span>}
                 </div>
               </div>
-              <span style={{ fontFamily:"system-ui", fontSize:11, padding:"3px 10px", borderRadius:20,
-                background:isSaved?"#14532d":"#f59e0b22", color:isSaved?"#4ade80":"#f59e0b" }}>
-                {isSaved ? "✓ Saisi" : "⏳ En attente"}
+              <span style={{ fontFamily:"system-ui",fontSize:11,padding:"3px 10px",borderRadius:20,
+                background:r?"#14532d":"#f59e0b22",color:r?"#4ade80":"#f59e0b"}}>
+                {r?"✓ Index saisi":"⏳ À saisir"}
               </span>
             </div>
 
             {r ? (
-              /* Relevé déjà saisi — afficher avec option modifier */
-              <div style={{ background:"#14532d22", borderRadius:10, padding:"14px", border:"1px solid #166834" }}>
-                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-                  <div>
-                    <div style={{ fontFamily:"system-ui", fontSize:22, fontWeight:700, color:"#4ade80" }}>
-                      {fM3(r.m3)} m³
-                    </div>
-                    <div style={{ fontFamily:"system-ui", fontSize:12, color:"#64748b", marginTop:2 }}>
-                      Saisi le {fDATE(r.enteredAt)}
-                      {a.totalBill && total > 0 &&
-                        <span style={{color:"#f59e0b", marginLeft:8}}>
-                          ≈ {fEUR((r.m3/total)*a.totalBill)} estimé
-                        </span>
-                      }
+              /* Index déjà saisi */
+              <div style={{ background:"#14532d22",borderRadius:10,padding:"16px",border:"1px solid #166834" }}>
+                <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:12, marginBottom:12 }}>
+                  <div style={{ textAlign:"center" }}>
+                    <div style={{ fontFamily:"system-ui",fontSize:10,color:"#64748b",textTransform:"uppercase",letterSpacing:1,marginBottom:4 }}>Index précédent</div>
+                    <div style={{ fontFamily:"system-ui",fontSize:16,fontWeight:700,color:"#94a3b8" }}>
+                      {r.lastIndex ? fM3(r.lastIndex) : "—"} <span style={{fontSize:11}}>m³</span>
                     </div>
                   </div>
-                  <button
-                    onClick={() => update({ appels:(copro.appels||[]).map(x=>
-                      x.id!==a.id?x:{...x,releves:(x.releves||[]).filter(rv=>rv.ownerId!==user.id)}) })}
-                    style={{ background:"none", border:"1px solid #1a3a5f", color:"#64748b",
-                      padding:"5px 12px", borderRadius:8, cursor:"pointer", fontFamily:"system-ui", fontSize:12 }}>
+                  <div style={{ textAlign:"center" }}>
+                    <div style={{ fontFamily:"system-ui",fontSize:10,color:"#64748b",textTransform:"uppercase",letterSpacing:1,marginBottom:4 }}>Index actuel</div>
+                    <div style={{ fontFamily:"system-ui",fontSize:16,fontWeight:700,color:"#38bdf8" }}>
+                      {fM3(r.currentIndex)} <span style={{fontSize:11}}>m³</span>
+                    </div>
+                  </div>
+                  <div style={{ textAlign:"center" }}>
+                    <div style={{ fontFamily:"system-ui",fontSize:10,color:"#64748b",textTransform:"uppercase",letterSpacing:1,marginBottom:4 }}>Consommation</div>
+                    <div style={{ fontFamily:"system-ui",fontSize:16,fontWeight:700,color:"#4ade80" }}>
+                      {fM3(r.m3)} <span style={{fontSize:11}}>m³</span>
+                    </div>
+                  </div>
+                </div>
+                {pm3 && (
+                  <div style={{ background:"#060c16",borderRadius:8,padding:"10px 12px",fontFamily:"system-ui",fontSize:13,textAlign:"center" }}>
+                    <span style={{color:"#64748b"}}>{fM3(r.m3)} m³ × {pm3.toFixed(4)} €/m³ = </span>
+                    <strong style={{color:"#f59e0b",fontSize:16}}>{fEUR(r.m3 * pm3)}</strong>
+                    <div style={{color:"#475569",fontSize:11,marginTop:2}}>estimation — le montant exact sera calculé après que tous aient saisi</div>
+                  </div>
+                )}
+                <div style={{textAlign:"right",marginTop:10}}>
+                  <button onClick={()=>update({appels:(copro.appels||[]).map(x=>x.id!==a.id?x:{...x,releves:(x.releves||[]).filter(rv=>rv.ownerId!==user.id)})})}
+                    style={{background:"none",border:"1px solid #1a3a5f",color:"#64748b",padding:"5px 14px",borderRadius:8,cursor:"pointer",fontFamily:"system-ui",fontSize:12}}>
                     ✏️ Modifier
                   </button>
                 </div>
               </div>
             ) : (
-              /* Formulaire de saisie */
+              /* Saisie de l'index */
               <div>
-                <div style={{ fontFamily:"system-ui", fontSize:12, color:"#94a3b8", marginBottom:10 }}>
-                  Saisissez votre consommation d'eau pour cette période :
-                </div>
-                <div style={{ display:"flex", gap:10, alignItems:"stretch" }}>
-                  <div style={{ position:"relative", flex:1 }}>
-                    <input
-                      type="number" min="0" step="0.001"
-                      value={vals[a.id] || ""}
-                      onChange={e => setVals(p => ({...p, [a.id]: e.target.value}))}
-                      onKeyDown={e => e.key==="Enter" && submit(a.id, vals[a.id])}
-                      placeholder="ex: 12.500"
-                      autoFocus
-                      style={{ ...S.inp, paddingRight:46, fontSize:16 }}
-                    />
-                    <span style={{ position:"absolute", right:12, top:"50%", transform:"translateY(-50%)",
-                      color:"#38bdf8", fontFamily:"system-ui", fontSize:14, fontWeight:700 }}>m³</span>
+                {lastIdx && (
+                  <div style={{ background:"#0a1628",borderRadius:8,padding:"10px 12px",marginBottom:12,fontFamily:"system-ui",fontSize:12,display:"flex",justifyContent:"space-between" }}>
+                    <span style={{color:"#64748b"}}>Votre dernier index enregistré :</span>
+                    <strong style={{color:"#38bdf8"}}>{fM3(lastIdx)} m³</strong>
                   </div>
-                  <button
-                    onClick={() => submit(a.id, vals[a.id])}
-                    disabled={!vals[a.id] || Number(vals[a.id]) <= 0}
-                    style={{ padding:"0 22px", borderRadius:10, border:"none",
-                      background:(!vals[a.id]||Number(vals[a.id])<=0)?"#1e3a5f":"linear-gradient(135deg,#059669,#10b981)",
-                      color:(!vals[a.id]||Number(vals[a.id])<=0)?"#475569":"#fff",
-                      fontFamily:"system-ui", fontSize:14, fontWeight:700,
-                      cursor:(!vals[a.id]||Number(vals[a.id])<=0)?"not-allowed":"pointer",
-                      whiteSpace:"nowrap" }}>
-                    ✓ Enregistrer
-                  </button>
-                </div>
-                {vals[a.id] && Number(vals[a.id]) > 0 && a.totalBill && total >= 0 && (
-                  <div style={{ fontFamily:"system-ui", fontSize:12, color:"#64748b", marginTop:8 }}>
-                    Estimation de votre part ≈{" "}
-                    <strong style={{color:"#4ade80"}}>
-                      {fEUR(((Number(vals[a.id]))/(total + Number(vals[a.id])))*a.totalBill)}
-                    </strong>
+                )}
+
+                <FL label="Votre index actuel (relevé sur votre compteur)">
+                  <div style={{display:"flex",gap:10}}>
+                    <div style={{position:"relative",flex:1}}>
+                      <input type="number" min="0" step="0.001"
+                        value={currentVal}
+                        onChange={e=>setVals(p=>({...p,[a.id]:e.target.value}))}
+                        onKeyDown={e=>e.key==="Enter"&&submit(a.id,currentVal)}
+                        placeholder={lastIdx ? `> ${fM3(lastIdx)}` : "ex: 1547.250"}
+                        autoFocus
+                        style={{...S.inp, paddingRight:42, fontSize:16, fontWeight:600}}/>
+                      <span style={{position:"absolute",right:12,top:"50%",transform:"translateY(-50%)",color:"#38bdf8",fontFamily:"system-ui",fontSize:13,fontWeight:700}}>m³</span>
+                    </div>
+                    <button onClick={()=>submit(a.id,currentVal)}
+                      disabled={!currentVal||Number(currentVal)<=0||(lastIdx&&Number(currentVal)<=lastIdx)}
+                      style={{padding:"0 22px",borderRadius:10,border:"none",
+                        background:(!currentVal||Number(currentVal)<=0)?"#1e3a5f":"linear-gradient(135deg,#059669,#10b981)",
+                        color:(!currentVal||Number(currentVal)<=0)?"#475569":"#fff",
+                        fontFamily:"system-ui",fontSize:14,fontWeight:700,
+                        cursor:(!currentVal||Number(currentVal)<=0)?"not-allowed":"pointer",whiteSpace:"nowrap"}}>
+                      ✓ Valider
+                    </button>
+                  </div>
+                </FL>
+
+                {/* Preview en temps réel */}
+                {previewConso !== null && previewConso >= 0 && (
+                  <div style={{background:"#0a1628",borderRadius:10,padding:"12px",border:"1px solid #1a3a5f44",marginTop:4}}>
+                    <div style={{display:"flex",justifyContent:"space-between",fontFamily:"system-ui",fontSize:13,marginBottom:6}}>
+                      <span style={{color:"#64748b"}}>Consommation calculée :</span>
+                      <strong style={{color:"#38bdf8"}}>{fM3(previewConso)} m³</strong>
+                    </div>
+                    {lastIdx && <div style={{fontFamily:"system-ui",fontSize:11,color:"#475569",marginBottom:8}}>
+                      {Number(currentVal).toFixed(3)} − {fM3(lastIdx)} = {fM3(previewConso)} m³
+                    </div>}
+                    {previewEur !== null && (
+                      <div style={{display:"flex",justifyContent:"space-between",fontFamily:"system-ui",fontSize:14,fontWeight:700}}>
+                        <span style={{color:"#64748b"}}>Votre part estimée :</span>
+                        <span style={{color:"#f59e0b"}}>{fEUR(previewEur)}</span>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {lastIdx && currentVal && Number(currentVal) <= lastIdx && Number(currentVal) > 0 && (
+                  <div style={{fontFamily:"system-ui",fontSize:12,color:"#f87171",marginTop:6}}>
+                    ⚠️ L'index actuel doit être supérieur à l'index précédent ({fM3(lastIdx)} m³)
                   </div>
                 )}
               </div>
@@ -1152,6 +1217,63 @@ function Dashboard({ copro, user, isSyndic, balance, members, updateCopro }) {
         <InlineReleveForm appels={openReleves} user={user} copro={copro} update={updateCopro} />
       )}
 
+      {/* Historique des index et consommations du membre */}
+      {!isSyndic && (() => {
+        const myUser = (copro.users||[]).find(u=>u.id===user.id);
+        const myReleves = (copro.appels||[])
+          .filter(a=>a.type==="eau"&&a.status!=="open")
+          .flatMap(a=>(a.releves||[]).filter(r=>r.ownerId===user.id).map(r=>({...r,appelTitle:a.title,appelDate:a.date,pm3:a.priceM3})))
+          .sort((a,b)=>new Date(b.appelDate)-new Date(a.appelDate));
+
+        if (!myUser && !myReleves.length) return null;
+        return (
+          <Sec title="📊 Mon historique de compteur">
+            {/* Index actuel */}
+            <div style={{...S.card,border:"1px solid #1a3a5f",marginBottom:10}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <div>
+                  <div style={{fontFamily:"system-ui",fontSize:12,color:"#64748b",marginBottom:4}}>
+                    Index enregistré sur votre compte
+                  </div>
+                  <div style={{fontFamily:"system-ui",fontSize:22,fontWeight:700,color:"#38bdf8"}}>
+                    {myUser?.lastIndex ? `${Number(myUser.lastIndex).toFixed(3)} m³` : "Non défini"}
+                  </div>
+                  <div style={{fontFamily:"system-ui",fontSize:11,color:"#475569",marginTop:3}}>
+                    🔒 Modifiable uniquement par l'administrateur
+                  </div>
+                </div>
+                <div style={{fontSize:32}}>🔢</div>
+              </div>
+            </div>
+
+            {/* Historique des relevés */}
+            {myReleves.length > 0 && (
+              <div style={{border:"1px solid #1a3a5f33",borderRadius:12,overflow:"hidden"}}>
+                <div style={{display:"grid",gridTemplateColumns:"2fr 1fr 1fr 1fr 1fr",background:"#060c16",padding:"9px 14px",borderBottom:"1px solid #1a3a5f22"}}>
+                  {["Période","Index préc.","Index actuel","Conso m³","Montant"].map(h=>(
+                    <div key={h} style={{fontFamily:"system-ui",fontSize:10,fontWeight:700,color:"#334155",letterSpacing:1,textTransform:"uppercase"}}>{h}</div>
+                  ))}
+                </div>
+                {myReleves.map((r,i)=>(
+                  <div key={i} style={{display:"grid",gridTemplateColumns:"2fr 1fr 1fr 1fr 1fr",padding:"10px 14px",borderBottom:i<myReleves.length-1?"1px solid #1a3a5f11":"none",background:i%2===0?"#0c1829":"#090f1d",alignItems:"center"}}>
+                    <div>
+                      <div style={{fontFamily:"system-ui",fontSize:12,fontWeight:600,color:"#e2e8f0"}}>{r.appelTitle}</div>
+                      <div style={{fontFamily:"system-ui",fontSize:11,color:"#475569"}}>{fDATE(r.appelDate)}</div>
+                    </div>
+                    <div style={{fontFamily:"system-ui",fontSize:12,color:"#64748b"}}>{r.lastIndex ? Number(r.lastIndex).toFixed(3) : "—"}</div>
+                    <div style={{fontFamily:"system-ui",fontSize:12,color:"#38bdf8",fontWeight:600}}>{Number(r.currentIndex).toFixed(3)}</div>
+                    <div style={{fontFamily:"system-ui",fontSize:12,color:"#4ade80",fontWeight:600}}>{Number(r.m3).toFixed(3)}</div>
+                    <div style={{fontFamily:"system-ui",fontSize:12,color:"#f59e0b",fontWeight:700}}>
+                      {r.pm3 ? fEUR(r.m3*r.pm3) : "—"}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </Sec>
+        );
+      })()}
+
       {/* Historique des paiements du membre */}
       {!isSyndic && (() => {
         const myHistory = (copro.appels||[])
@@ -1236,41 +1358,27 @@ function AppelsTab({ copro, members, update }) {
   const totalConso = members.reduce((s,m)=>s+(Number(mConsos[m.id])||0),0);
 
   const canCreate =
-    type==="eau"
-      ? saisieMode==="membres"
-        ? (title.trim()&&bill&&Number(bill)>0)
-        : (title.trim()&&bill&&Number(bill)>0&&members.length>0&&members.every(m=>mConsos[m.id]&&Number(mConsos[m.id])>0))
-    : type==="assurance"
-      ? (title.trim()&&copro.assuranceAnnuelle&&Number(copro.assuranceAnnuelle)>0)
-    :   (title.trim()&&members.length>0&&members.every(m=>mAmts[m.id]&&!isNaN(Number(mAmts[m.id]))));
+    type==="eau"        ? (title.trim() && bill && Number(bill)>0)
+    : type==="assurance" ? (title.trim() && copro.assuranceAnnuelle && Number(copro.assuranceAnnuelle)>0)
+    :                      (title.trim() && members.length>0 && members.every(m=>mAmts[m.id]&&!isNaN(Number(mAmts[m.id]))));
 
   async function create() {
     let ap = {id:uid(),title:title.trim(),date,note,type,status:"active",createdAt:new Date().toISOString()};
     if (type==="eau") {
       const bill_n = Number(bill);
-      const pm3inv = invM3 && Number(invM3)>0 ? bill_n/Number(invM3) : null;
-
-      if (saisieMode==="syndic") {
-        // ── Mode syndic : calcul immédiat ──
-        const tc = members.reduce((s,m)=>s+(Number(mConsos[m.id])||0),0);
-        const pm3 = pm3inv || (tc>0 ? bill_n/tc : 0);
-        const raw = members.map(m=>(Number(mConsos[m.id])||0)/tc*bill_n);
-        const r = raw.map(v=>Math.round(v*100)/100);
-        const diff = Math.round((bill_n-r.reduce((s,v)=>s+v,0))*100)/100;
-        r[r.length-1]=Math.round((r[r.length-1]+diff)*100)/100;
-        ap = {...ap,
-          totalBill: bill_n, invoiceM3: invM3?Number(invM3):null,
-          totalConso: tc, priceM3: pm3, status: "active",
-          payments: members.map((m,i)=>({ owner:m.id, ownerName:m.name, amount:r[i], m3:Number(mConsos[m.id])||0, paid:false, paidDate:null }))
-        };
-      } else {
-        // ── Mode membres : en attente des relevés ──
-        ap = {...ap,
-          totalBill: bill_n, invoiceM3: invM3?Number(invM3):null,
-          priceM3: pm3inv, status: "open", releves: [],
-          payments: members.map(m=>({ owner:m.id, ownerName:m.name, amount:0, m3:0, paid:false, paidDate:null }))
-        };
-      }
+      // Prix m³ : depuis paramètres ou saisi manuellement
+      const pm3 = copro.refPriceM3 && Number(copro.refPriceM3)>0
+        ? Number(copro.refPriceM3)
+        : invM3 && Number(invM3)>0 ? Number(invM3) : null;
+      // Appel créé en statut "open" — chaque membre saisit son index
+      ap = {
+        ...ap,
+        totalBill: bill_n,
+        priceM3: pm3,
+        status: "open",
+        releves: [],   // index saisis par chaque membre
+        payments: members.map(m=>({ owner:m.id, ownerName:m.name, amount:0, m3:0, paid:false, paidDate:null }))
+      };
     } else if (type==="assurance") {
       const total=Number(copro.assuranceAnnuelle);
       const shares=splitEqual(total,members.length);
@@ -1288,13 +1396,33 @@ function AppelsTab({ copro, members, update }) {
       if (a.id!==id) return a;
       const tc=a.releves.reduce((s,r)=>s+Number(r.m3),0);
       if (!tc) return a;
-      const shares=splitByM3(a.releves.map(r=>r.m3),a.totalBill);
-      const pm3=a.invoiceM3?a.totalBill/a.invoiceM3:a.totalBill/tc;
-      const payments=a.releves.map((r,i)=>({owner:r.ownerId,ownerName:r.ownerName,amount:shares[i],m3:Number(r.m3),paid:false,paidDate:null}));
+      // Prix m³ : depuis l'appel ou depuis les paramètres copro
+      const pm3 = a.priceM3 || (copro.refPriceM3?Number(copro.refPriceM3):null) || (a.totalBill/tc);
+      // Chaque membre paie exactement sa conso × prix m³
+      // Ajustement du dernier pour que le total = facture exacte
+      const rawAmounts = a.releves.map(r=>Number(r.m3)*pm3);
+      const rounded = rawAmounts.map(v=>Math.round(v*100)/100);
+      const diff = Math.round((a.totalBill-rounded.reduce((s,v)=>s+v,0))*100)/100;
+      rounded[rounded.length-1]=Math.round((rounded[rounded.length-1]+diff)*100)/100;
+      const payments=a.releves.map((r,i)=>({
+        owner:r.ownerId, ownerName:r.ownerName,
+        amount:rounded[i], m3:Number(r.m3),
+        currentIndex:r.currentIndex, lastIndex:r.lastIndex,
+        paid:false, paidDate:null
+      }));
       return {...a,payments,totalConso:tc,priceM3:pm3,status:"active"};
     });
     await update({appels});
   }
+
+  // Auto-validation quand tous les membres ont saisi
+  useEffect(() => {
+    const openEau = (copro.appels||[]).filter(a=>a.type==="eau"&&a.status==="open");
+    openEau.forEach(a => {
+      const allIn = members.length > 0 && (a.releves||[]).length >= members.length;
+      if (allIn) validateReleves(a.id);
+    });
+  }, [copro.appels]);
 
   async function togglePaid(appelId,ownerId) {
     const appels=(copro.appels||[]).map(a=>{
@@ -1338,110 +1466,61 @@ function AppelsTab({ copro, members, update }) {
             <FL label="Date"><input type="date" value={date} onChange={e=>setDate(e.target.value)} style={S.inp}/></FL>
           </div>
 
-          {type==="eau" && <>
-            {/* Montant TTC */}
-            <FL label="💶 Montant total de la facture TTC (€)">
-              <NIn value={bill} onChange={handleBill} placeholder="0.00" unit="€"/>
-            </FL>
-
-            {/* m³ officiel facture */}
-            <FL label={copro.refPriceM3 ? "💧 m³ facturés — calculé automatiquement" : "💧 m³ total facturé (selon votre facture)"}>
-              <NIn value={invM3} onChange={setInvM3} placeholder="0.000" unit="m³"/>
-              {priceM3 && (
-                <div style={{marginTop:7,fontFamily:"system-ui",fontSize:12}}>
-                  Prix exact : <strong style={{color:"#a78bfa"}}>{priceM3.toFixed(5)} €/m³</strong>
-                  {copro.refPriceM3 && <span style={{color:"#4ade80",marginLeft:8}}>✓ calculé depuis votre tarif</span>}
-                </div>
-              )}
-            </FL>
-
-            {/* Mode de saisie */}
-            {bill && Number(bill) > 0 && members.length > 0 && (
-              <div style={{marginBottom:16}}>
-                <div style={{fontFamily:"system-ui",fontSize:11,fontWeight:700,color:"#60a5fa",textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>
-                  Qui saisit les relevés m³ ?
-                </div>
-                <div style={{display:"flex",gap:8}}>
-                  {[
-                    { id:"syndic",  label:"👑 Je saisis tout maintenant",        sub:"Calcul immédiat" },
-                    { id:"membres", label:"👥 Chaque membre saisit son relevé",   sub:"Ils seront notifiés" },
-                  ].map(mode => (
-                    <button key={mode.id} onClick={()=>setSaisieMode(mode.id)} style={{
-                      flex:1, padding:"12px 10px", borderRadius:12, cursor:"pointer",
-                      border:`2px solid ${saisieMode===mode.id?"#2563eb":"#1a3a5f"}`,
-                      background:saisieMode===mode.id?"#1d4ed822":"#060c16",
-                      textAlign:"center",
-                    }}>
-                      <div style={{fontFamily:"system-ui",fontSize:13,fontWeight:700,color:saisieMode===mode.id?"#7dd3fc":"#64748b"}}>{mode.label}</div>
-                      <div style={{fontFamily:"system-ui",fontSize:11,color:"#334155",marginTop:3}}>{mode.sub}</div>
-                    </button>
-                  ))}
-                </div>
+          {type==="eau" && (
+            <div style={{background:"#060c16",borderRadius:12,padding:"18px",border:"1px solid #1a3a5f",marginBottom:4}}>
+              <div style={{fontFamily:"system-ui",fontSize:13,fontWeight:700,color:"#60a5fa",marginBottom:16}}>
+                💧 Facture d'eau
               </div>
-            )}
 
-            {/* Mode syndic — saisie directe */}
-            {saisieMode==="syndic" && bill && Number(bill) > 0 && members.length > 0 && (
-              <div style={{background:"#060c16",borderRadius:12,padding:"16px",border:"1px solid #1a3a5f",marginBottom:14}}>
-                <div style={{fontFamily:"system-ui",fontSize:12,fontWeight:700,color:"#60a5fa",marginBottom:12,textTransform:"uppercase",letterSpacing:1}}>
-                  📊 Consommation de chaque propriétaire (m³)
+              {/* Montant TTC */}
+              <FL label="Montant total TTC à rembourser (€)">
+                <NIn value={bill} onChange={handleBill} placeholder="0.00" unit="€"/>
+              </FL>
+
+              {/* Prix m³ auto ou manuel */}
+              <FL label={copro.refPriceM3 ? "Prix du m³ — depuis vos paramètres" : "Prix du m³ (optionnel — depuis votre facture)"}>
+                <div style={{position:"relative"}}>
+                  <input type="number" min="0" step="0.00001"
+                    value={copro.refPriceM3 || invM3}
+                    onChange={e=>setInvM3(e.target.value)}
+                    placeholder="ex: 3.78500"
+                    readOnly={!!copro.refPriceM3}
+                    style={{...S.inp, paddingRight:52, opacity: copro.refPriceM3?0.7:1}}/>
+                  <span style={{position:"absolute",right:12,top:"50%",transform:"translateY(-50%)",color:"#a78bfa",fontFamily:"system-ui",fontSize:11,fontWeight:700}}>€/m³</span>
                 </div>
-                {members.map((m,i) => {
-                  const mc = mConsos[m.id] || "";
-                  const tc = members.reduce((s,x)=>s+(Number(mConsos[x.id])||0),0);
-                  const part = mc && tc > 0 && bill ? (Number(mc)/tc)*Number(bill) : null;
-                  return (
-                    <div key={i} style={{display:"flex",alignItems:"center",gap:10,marginBottom:10}}>
-                      <span style={{fontFamily:"system-ui",fontSize:13,fontWeight:600,color:"#e2e8f0",width:110,flexShrink:0}}>{m.name}</span>
-                      <div style={{position:"relative",flex:1}}>
-                        <input type="number" min="0" step="0.001" value={mc}
-                          onChange={e=>{const n={...mConsos};n[m.id]=e.target.value;setMConsos(n);}}
-                          placeholder="0.000" style={{...S.inp,paddingRight:42}}/>
-                        <span style={{position:"absolute",right:12,top:"50%",transform:"translateY(-50%)",color:"#38bdf8",fontFamily:"system-ui",fontSize:12,fontWeight:700}}>m³</span>
-                      </div>
-                      {part!==null && (
-                        <span style={{fontFamily:"system-ui",fontSize:15,fontWeight:700,color:"#4ade80",whiteSpace:"nowrap",minWidth:72,textAlign:"right"}}>
-                          {fEUR(part)}
-                        </span>
-                      )}
-                    </div>
-                  );
-                })}
-                {totalConso > 0 && bill && (
-                  <div style={{borderTop:"1px solid #1a3a5f",paddingTop:10,marginTop:4,display:"flex",gap:16,flexWrap:"wrap"}}>
-                    <span style={{fontFamily:"system-ui",fontSize:12,color:"#64748b"}}>
-                      Total : <strong style={{color:"#38bdf8"}}>{totalConso.toFixed(3)} m³</strong>
-                    </span>
-                    <span style={{fontFamily:"system-ui",fontSize:12,color:"#64748b"}}>
-                      Prix/m³ : <strong style={{color:"#a78bfa"}}>{(Number(bill)/totalConso).toFixed(5)} €</strong>
-                    </span>
-                    <span style={{fontFamily:"system-ui",fontSize:12,color:"#64748b"}}>
-                      Facture : <strong style={{color:"#60a5fa"}}>{fEUR(Number(bill))}</strong>
-                    </span>
+                {copro.refPriceM3 && <div style={{fontFamily:"system-ui",fontSize:11,color:"#4ade80",marginTop:5}}>✓ Tarif enregistré dans Paramètres</div>}
+              </FL>
+
+              {/* Explication du fonctionnement */}
+              <div style={{background:"#0a1e38",borderRadius:10,padding:"12px 14px",border:"1px solid #2563eb33",marginTop:4}}>
+                <div style={{fontFamily:"system-ui",fontSize:12,fontWeight:700,color:"#60a5fa",marginBottom:8}}>
+                  ℹ️ Comment ça marche
+                </div>
+                <div style={{fontFamily:"system-ui",fontSize:12,color:"#64748b",lineHeight:1.8}}>
+                  1. Vous créez cet appel avec le montant de la facture<br/>
+                  2. Chaque propriétaire se connecte et saisit son <strong style={{color:"#e2e8f0"}}>index actuel</strong> du compteur<br/>
+                  3. L'app calcule automatiquement : <strong style={{color:"#38bdf8"}}>index actuel − index précédent = m³ consommés</strong><br/>
+                  4. Chaque propriétaire voit exactement <strong style={{color:"#4ade80"}}>ce qu'il vous doit en €</strong>
+                </div>
+                {members.length > 0 && (
+                  <div style={{marginTop:12,paddingTop:10,borderTop:"1px solid #1a3a5f33"}}>
+                    <div style={{fontFamily:"system-ui",fontSize:11,color:"#475569",marginBottom:6}}>Index précédents enregistrés :</div>
+                    {members.map((m,i)=>{
+                      const lastIdx = m.lastIndex;
+                      return (
+                        <div key={i} style={{display:"flex",justifyContent:"space-between",fontFamily:"system-ui",fontSize:12,color:"#64748b",marginBottom:3}}>
+                          <span>{m.name}</span>
+                          <span style={{color: lastIdx ? "#38bdf8" : "#f59e0b"}}>
+                            {lastIdx ? `Index précédent : ${fM3(lastIdx)} m³` : "⚠️ Premier relevé (pas d'index précédent)"}
+                          </span>
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
               </div>
-            )}
-
-            {/* Mode membres — message info */}
-            {saisieMode==="membres" && bill && Number(bill) > 0 && (
-              <div style={{background:"#0a1e38",borderRadius:12,padding:"14px",border:"1px solid #2563eb44",marginBottom:14}}>
-                <div style={{fontFamily:"system-ui",fontSize:13,fontWeight:700,color:"#60a5fa",marginBottom:8}}>
-                  👥 Relevés à saisir par les membres
-                </div>
-                {members.map((m,i)=>(
-                  <div key={i} style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
-                    <span style={{width:8,height:8,borderRadius:"50%",background:"#f59e0b",display:"inline-block",flexShrink:0}}/>
-                    <span style={{fontFamily:"system-ui",fontSize:13,color:"#94a3b8"}}>{m.name}</span>
-                    <span style={{fontFamily:"system-ui",fontSize:11,color:"#f59e0b",marginLeft:"auto"}}>⏳ devra saisir son relevé</span>
-                  </div>
-                ))}
-                <div style={{fontFamily:"system-ui",fontSize:11,color:"#475569",marginTop:10,lineHeight:1.6}}>
-                  Dès que tous les relevés sont saisis, le calcul se fait automatiquement et chaque membre voit sa part.
-                </div>
-              </div>
-            )}
-          </>}
+            </div>
+          )}
 
           {type==="assurance" && <>
             {copro.assuranceAnnuelle&&Number(copro.assuranceAnnuelle)>0
@@ -1921,11 +2000,11 @@ const S = {
   h2:     {margin:"0 0 20px",fontSize:19,color:"#f0f9ff",fontFamily:"Georgia,serif"},
 };
 
-
-    const root = ReactDOM.createRoot(document.getElementById("root"));
-    root.render(React.createElement(App));
-    // Show app after first render
-    setTimeout(window.__showApp, 100);
+    ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
+    setTimeout(()=>{
+      document.getElementById("splash").style.display="none";
+      document.getElementById("root").style.display="block";
+    },500);
   </script>
 </body>
 </html>
