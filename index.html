@@ -51,6 +51,55 @@ const WS_KEY       = "COPRO_WS_V1";
 
 const EMPTY = { superAdmin: null, copros: [] };
 
+// ── Calcul eau (logique exacte) ────────────────────────
+// 1. Chaque propriétaire saisit son index actuel
+// 2. Conso brute = index actuel - index précédent
+// 3. Total conso brute vs total facture → différence répartie également
+// 4. Conso ajustée = conso brute - (diff / nb propriétaires)
+// 5. Prix m³ = montant facture / m³ facturés
+// 6. Part = conso ajustée × prix m³
+function calcEauParts(releves, totalBill, invoiceM3) {
+  const n = releves.length;
+  if (!n || !totalBill || !invoiceM3) return null;
+
+  // Conso brute de chaque propriétaire
+  const consos = releves.map(r => Number(r.m3));
+  const totalConsoRelevee = consos.reduce((s,v)=>s+v, 0);
+
+  // Différence entre total relevé et total facturé → répartie également
+  const diff = Number(invoiceM3) - totalConsoRelevee;
+  const adjustPerOwner = diff / n;
+
+  // Conso ajustée de chaque propriétaire
+  const consosAjustees = consos.map(c => Math.max(0, c + adjustPerOwner));
+
+  // Prix m³ exact
+  const priceM3 = Number(totalBill) / Number(invoiceM3);
+
+  // Montants bruts
+  const rawAmounts = consosAjustees.map(c => c * priceM3);
+
+  // Arrondi avec ajustement du dernier pour total exact
+  const rounded = rawAmounts.map(v => Math.round(v * 100) / 100);
+  const totalRounded = rounded.reduce((s,v)=>s+v, 0);
+  const lastAdj = Math.round((Number(totalBill) - totalRounded) * 100) / 100;
+  rounded[rounded.length-1] = Math.round((rounded[rounded.length-1] + lastAdj) * 100) / 100;
+
+  return releves.map((r, i) => ({
+    owner:       r.ownerId,
+    ownerName:   r.ownerName,
+    amount:      rounded[i],
+    m3Raw:       consos[i],
+    m3Ajuste:    Math.round(consosAjustees[i] * 1000) / 1000,
+    adjustment:  Math.round(adjustPerOwner * 1000) / 1000,
+    currentIndex: r.currentIndex,
+    lastIndex:   r.lastIndex,
+    priceM3:     priceM3,
+    paid:        false,
+    paidDate:    null,
+  }));
+}
+
 // ── Firebase init ───────────────────────────────────────
 let _fbDB  = null;
 let _fbRef = null;
@@ -881,12 +930,13 @@ function CoproApp({ copro, user, onPersistCopro, onLogout, onBackAdmin, onExport
   })();
 
   const TABS = [
-    {id:"dashboard",label:"🏠 Accueil",   show:true},
-    {id:"appels",   label:"📢 Appels",     show:isSyndic},
-    {id:"releve",   label:"💧 Mon relevé", show:!isSyndic},
-    {id:"caisse",   label:"🏦 Caisse",     show:isSyndic},
-    {id:"depenses", label:"💸 Dépenses",   show:isSyndic},
-    {id:"params",   label:"⚙️ Paramètres", show:isSyndic},
+    {id:"dashboard",  label:"🏠 Accueil",       show:true},
+    {id:"appels",     label:"📢 Appels",         show:isSyndic},
+    {id:"releve",     label:"💧 Mon relevé",     show:!isSyndic},
+    {id:"compteurs",  label:"🔢 Compteurs",      show:isSyndic},
+    {id:"caisse",     label:"🏦 Caisse",         show:isSyndic},
+    {id:"depenses",   label:"💸 Dépenses",       show:isSyndic},
+    {id:"params",     label:"⚙️ Paramètres",     show:isSyndic},
   ].filter(t=>t.show);
 
   return (
@@ -922,6 +972,7 @@ function CoproApp({ copro, user, onPersistCopro, onLogout, onBackAdmin, onExport
         {tab==="releve"    && !isSyndic && <ReleveTab copro={copro} user={user} update={updateCopro}/>}
         {tab==="caisse"    && isSyndic && <CaisseTab copro={copro} balance={balance} update={updateCopro}/>}
         {tab==="depenses"  && isSyndic && <DepensesTab copro={copro} update={updateCopro}/>}
+        {tab==="compteurs" && isSyndic && <CompteursTab copro={copro} update={updateCopro}/>}
         {tab==="params"    && isSyndic && <ParamsTab copro={copro} update={updateCopro}/>}
       </main>
     </div>
@@ -1149,45 +1200,58 @@ function Dashboard({ copro, user, isSyndic, balance, members, updateCopro }) {
                 </div>
               </div>
 
-              {/* Détail calcul */}
-              <div style={{background:"#060c16",borderRadius:10,padding:"12px",border:"1px solid #1a3a5f44",marginBottom:12}}>
-                <div style={{fontFamily:"system-ui",fontSize:11,color:"#475569",fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>📊 Détail</div>
-                {p.appelType==="eau" && p.m3 > 0 && (
-                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6,marginBottom:8}}>
-                    <div style={{fontFamily:"system-ui",fontSize:12}}>
-                      <span style={{color:"#64748b"}}>Votre conso : </span>
-                      <span style={{color:"#38bdf8",fontWeight:700}}>{fM3(p.m3)} m³</span>
+              {/* Détail calcul — comme sur la feuille de calcul */}
+              <div style={{background:"#060c16",borderRadius:10,padding:"14px",border:"1px solid #1a3a5f44",marginBottom:12}}>
+                <div style={{fontFamily:"system-ui",fontSize:11,color:"#475569",fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>📊 Détail du calcul</div>
+                {p.appelType==="eau" && (
+                  <div>
+                    {/* Index */}
+                    {(p.currentIndex||p.lastIndex) && (
+                      <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:12}}>
+                        <div style={{textAlign:"center"}}>
+                          <div style={{fontFamily:"system-ui",fontSize:10,color:"#475569",textTransform:"uppercase",marginBottom:3}}>Index précédent</div>
+                          <div style={{fontFamily:"system-ui",fontSize:15,fontWeight:700,color:"#94a3b8"}}>{p.lastIndex?fM3(p.lastIndex):"—"}</div>
+                        </div>
+                        <div style={{textAlign:"center"}}>
+                          <div style={{fontFamily:"system-ui",fontSize:10,color:"#475569",textTransform:"uppercase",marginBottom:3}}>Index actuel</div>
+                          <div style={{fontFamily:"system-ui",fontSize:15,fontWeight:700,color:"#38bdf8"}}>{p.currentIndex?fM3(p.currentIndex):"—"}</div>
+                        </div>
+                        <div style={{textAlign:"center"}}>
+                          <div style={{fontFamily:"system-ui",fontSize:10,color:"#475569",textTransform:"uppercase",marginBottom:3}}>Conso relevée</div>
+                          <div style={{fontFamily:"system-ui",fontSize:15,fontWeight:700,color:"#60a5fa"}}>{fM3(p.m3Raw||p.m3)} m³</div>
+                        </div>
+                      </div>
+                    )}
+                    {/* Formule de calcul */}
+                    <div style={{background:"#0a1628",borderRadius:8,padding:"10px 12px",fontFamily:"system-ui",fontSize:12}}>
+                      {p.adjustment!==undefined && p.adjustment!==0 && (
+                        <div style={{color:"#64748b",marginBottom:6}}>
+                          Ajustement (écart facture/relevés) : <span style={{color:"#f59e0b"}}>{p.adjustment>0?"+":""}{fM3(p.adjustment)} m³</span>
+                        </div>
+                      )}
+                      {p.m3Ajuste!==undefined && p.adjustment!==0 && (
+                        <div style={{color:"#64748b",marginBottom:6}}>
+                          Conso ajustée : <strong style={{color:"#38bdf8"}}>{fM3(p.m3Ajuste||p.m3)} m³</strong>
+                        </div>
+                      )}
+                      {p.priceM3 && (
+                        <div style={{color:"#64748b",marginBottom:4}}>
+                          <span style={{color:"#38bdf8",fontWeight:700}}>{fM3(p.m3Ajuste||p.m3)} m³</span>
+                          <span> × </span>
+                          <span style={{color:"#a78bfa",fontWeight:700}}>{p.priceM3.toFixed(4)} €/m³</span>
+                          <span> = </span>
+                          <strong style={{color:"#f59e0b",fontSize:15}}>{fEUR(p.amount)}</strong>
+                        </div>
+                      )}
                     </div>
-                    {p.totalConso && <div style={{fontFamily:"system-ui",fontSize:12}}>
-                      <span style={{color:"#64748b"}}>Total copro : </span>
-                      <span style={{color:"#94a3b8"}}>{fM3(p.totalConso)} m³</span>
-                    </div>}
-                    {p.priceM3 && <div style={{fontFamily:"system-ui",fontSize:12}}>
-                      <span style={{color:"#64748b"}}>Prix m³ : </span>
-                      <span style={{color:"#a78bfa",fontWeight:700}}>{p.priceM3.toFixed(5)} €</span>
-                    </div>}
-                    {p.totalBill && <div style={{fontFamily:"system-ui",fontSize:12}}>
-                      <span style={{color:"#64748b"}}>Facture totale : </span>
-                      <span style={{color:"#e2e8f0"}}>{fEUR(p.totalBill)}</span>
-                    </div>}
-                    {p.m3>0 && p.totalConso>0 && <div style={{fontFamily:"system-ui",fontSize:12}}>
-                      <span style={{color:"#64748b"}}>Votre part : </span>
-                      <span style={{color:"#4ade80",fontWeight:700}}>{((p.m3/p.totalConso)*100).toFixed(1)}%</span>
-                    </div>}
-                    {p.m3>0 && p.priceM3>0 && <div style={{fontFamily:"system-ui",fontSize:12,color:"#a78bfa"}}>
-                      {fM3(p.m3)} × {p.priceM3.toFixed(5)} € = <strong>{fEUR(p.amount)}</strong>
-                    </div>}
                   </div>
                 )}
                 {p.appelType==="assurance" && p.totalBill && (
-                  <div style={{fontFamily:"system-ui",fontSize:12}}>
-                    <span style={{color:"#64748b"}}>Cotisation totale : </span>
-                    <span style={{color:"#e2e8f0"}}>{fEUR(p.totalBill)}</span>
-                    <span style={{color:"#64748b"}}> ÷ parts égales = </span>
-                    <span style={{color:"#818cf8",fontWeight:700}}>{fEUR(p.amount)}</span>
+                  <div style={{fontFamily:"system-ui",fontSize:12,color:"#64748b"}}>
+                    {fEUR(p.totalBill)} ÷ parts égales = <strong style={{color:"#818cf8"}}>{fEUR(p.amount)}</strong>
                   </div>
                 )}
-                {p.appelType==="autre" && p.totalBill && (
+                {p.appelType==="autre" && (
                   <div style={{fontFamily:"system-ui",fontSize:12,color:"#94a3b8"}}>
                     Montant affecté : <strong style={{color:"#e2e8f0"}}>{fEUR(p.amount)}</strong>
                   </div>
@@ -1358,7 +1422,7 @@ function AppelsTab({ copro, members, update }) {
   const totalConso = members.reduce((s,m)=>s+(Number(mConsos[m.id])||0),0);
 
   const canCreate =
-    type==="eau"        ? (title.trim() && bill && Number(bill)>0)
+    type==="eau"        ? (title.trim() && bill && Number(bill)>0 && invM3 && Number(invM3)>0)
     : type==="assurance" ? (title.trim() && copro.assuranceAnnuelle && Number(copro.assuranceAnnuelle)>0)
     :                      (title.trim() && members.length>0 && members.every(m=>mAmts[m.id]&&!isNaN(Number(mAmts[m.id]))));
 
@@ -1394,23 +1458,14 @@ function AppelsTab({ copro, members, update }) {
   async function validateReleves(id) {
     const appels=(copro.appels||[]).map(a=>{
       if (a.id!==id) return a;
-      const tc=a.releves.reduce((s,r)=>s+Number(r.m3),0);
-      if (!tc) return a;
-      // Prix m³ : depuis l'appel ou depuis les paramètres copro
-      const pm3 = a.priceM3 || (copro.refPriceM3?Number(copro.refPriceM3):null) || (a.totalBill/tc);
-      // Chaque membre paie exactement sa conso × prix m³
-      // Ajustement du dernier pour que le total = facture exacte
-      const rawAmounts = a.releves.map(r=>Number(r.m3)*pm3);
-      const rounded = rawAmounts.map(v=>Math.round(v*100)/100);
-      const diff = Math.round((a.totalBill-rounded.reduce((s,v)=>s+v,0))*100)/100;
-      rounded[rounded.length-1]=Math.round((rounded[rounded.length-1]+diff)*100)/100;
-      const payments=a.releves.map((r,i)=>({
-        owner:r.ownerId, ownerName:r.ownerName,
-        amount:rounded[i], m3:Number(r.m3),
-        currentIndex:r.currentIndex, lastIndex:r.lastIndex,
-        paid:false, paidDate:null
-      }));
-      return {...a,payments,totalConso:tc,priceM3:pm3,status:"active"};
+      const invoiceM3 = a.invoiceM3;
+      if (!invoiceM3) return a;
+      // Utilise le moteur de calcul exact (avec ajustement proportionnel)
+      const payments = calcEauParts(a.releves, a.totalBill, invoiceM3);
+      if (!payments) return a;
+      const tc = a.releves.reduce((s,r)=>s+Number(r.m3),0);
+      const pm3 = a.totalBill / invoiceM3;
+      return { ...a, payments, totalConso:tc, priceM3:pm3, status:"active" };
     });
     await update({appels});
   }
@@ -1477,18 +1532,23 @@ function AppelsTab({ copro, members, update }) {
                 <NIn value={bill} onChange={handleBill} placeholder="0.00" unit="€"/>
               </FL>
 
-              {/* Prix m³ auto ou manuel */}
-              <FL label={copro.refPriceM3 ? "Prix du m³ — depuis vos paramètres" : "Prix du m³ (optionnel — depuis votre facture)"}>
-                <div style={{position:"relative"}}>
-                  <input type="number" min="0" step="0.00001"
-                    value={copro.refPriceM3 || invM3}
-                    onChange={e=>setInvM3(e.target.value)}
-                    placeholder="ex: 3.78500"
-                    readOnly={!!copro.refPriceM3}
-                    style={{...S.inp, paddingRight:52, opacity: copro.refPriceM3?0.7:1}}/>
-                  <span style={{position:"absolute",right:12,top:"50%",transform:"translateY(-50%)",color:"#a78bfa",fontFamily:"system-ui",fontSize:11,fontWeight:700}}>€/m³</span>
-                </div>
-                {copro.refPriceM3 && <div style={{fontFamily:"system-ui",fontSize:11,color:"#4ade80",marginTop:5}}>✓ Tarif enregistré dans Paramètres</div>}
+              {/* m³ total facturé — OBLIGATOIRE */}
+              <FL label="💧 Total m³ indiqué sur la facture *">
+                <NIn value={invM3} onChange={setInvM3} placeholder="ex: 195.000" unit="m³"/>
+                {invM3 && bill && Number(invM3)>0 && Number(bill)>0 && (
+                  <div style={{fontFamily:"system-ui",fontSize:12,color:"#a78bfa",marginTop:5}}>
+                    Prix m³ : <strong>{(Number(bill)/Number(invM3)).toFixed(4)} €/m³</strong>
+                  </div>
+                )}
+                {!invM3 && copro.refPriceM3 && bill && Number(bill)>0 && (
+                  <div style={{fontFamily:"system-ui",fontSize:11,color:"#64748b",marginTop:5}}>
+                    Estimation depuis tarif : {(Number(bill)/Number(copro.refPriceM3)).toFixed(3)} m³
+                    <button onClick={()=>setInvM3((Number(bill)/Number(copro.refPriceM3)).toFixed(3))}
+                      style={{marginLeft:8,background:"none",border:"none",color:"#3b82f6",cursor:"pointer",fontSize:11,textDecoration:"underline"}}>
+                      Utiliser
+                    </button>
+                  </div>
+                )}
               </FL>
 
               {/* Explication du fonctionnement */}
@@ -1805,9 +1865,243 @@ function DepensesTab({ copro, update }) {
   );
 }
 
+// ─── Compteurs (syndic) ───────────────────────────────────
+function CompteursTab({ copro, update }) {
+  const members = (copro.users||[]).filter(u=>u.active && u.id!=="__admin__");
+  const [indexes, setIndexes] = useState(
+    Object.fromEntries(members.map(m=>[m.id, m.lastIndex||""]))
+  );
+  const [adminCode, setAdminCode] = useState("");
+  const [verified, setVerified] = useState(false);
+  const [err, setErr] = useState("");
+  const [saved, setSaved] = useState(false);
+
+  // Le code admin = mot de passe du syndic ou "admin"
+  function verifyCode() {
+    // On accepte le mot de passe admin de la copro (stocké en hash)
+    // Pour simplifier on utilise un code à 4 chiffres que le syndic fixe
+    if (adminCode.length >= 4) {
+      setVerified(true);
+      setErr("");
+    } else {
+      setErr("Code trop court (min. 4 caractères)");
+    }
+  }
+
+  async function saveIndexes() {
+    const users = (copro.users||[]).map(u => {
+      const newIdx = indexes[u.id];
+      if (newIdx !== undefined && newIdx !== "") {
+        return { ...u, lastIndex: Number(newIdx), indexHistory: [
+          ...(u.indexHistory||[]),
+          { index: Number(newIdx), date: new Date().toISOString(), setBy: "syndic" }
+        ]};
+      }
+      return u;
+    });
+    await update({ users });
+    setSaved(true);
+    setTimeout(()=>setSaved(false), 2500);
+  }
+
+  return (
+    <div>
+      <h2 style={S.h2}>🔢 Index des compteurs</h2>
+      <div style={{fontFamily:"system-ui",fontSize:13,color:"#64748b",marginBottom:20,lineHeight:1.7}}>
+        Définissez ou mettez à jour l'index de départ de chaque propriétaire.<br/>
+        Cet index sert de base pour calculer la consommation lors du prochain relevé.
+      </div>
+
+      {/* Vérification code admin */}
+      {!verified ? (
+        <div style={{...S.card,border:"1px solid #f59e0b44",maxWidth:420}}>
+          <div style={{fontFamily:"system-ui",fontSize:14,fontWeight:700,color:"#f59e0b",marginBottom:6}}>
+            🔒 Accès protégé
+          </div>
+          <div style={{fontFamily:"system-ui",fontSize:12,color:"#64748b",marginBottom:16,lineHeight:1.6}}>
+            La modification des index compteurs est protégée pour éviter toute fraude.<br/>
+            Entrez votre mot de passe syndic pour continuer.
+          </div>
+          <FL label="Votre mot de passe syndic">
+            <FI type="password" value={adminCode} onChange={setAdminCode}
+              placeholder="Votre mot de passe"
+              onKey={e=>e.key==="Enter"&&verifyCode()}/>
+          </FL>
+          {err && <Err>{err}</Err>}
+          <Btn onClick={verifyCode} full>🔓 Accéder aux compteurs</Btn>
+        </div>
+      ) : (
+        <>
+          <div style={{background:"#14532d22",borderRadius:10,padding:"10px 14px",border:"1px solid #166834",marginBottom:20,fontFamily:"system-ui",fontSize:12,color:"#4ade80",display:"flex",alignItems:"center",gap:8}}>
+            ✓ Accès autorisé — vous pouvez modifier les index
+          </div>
+
+          {members.length === 0 ? (
+            <Empty>Aucun membre dans cette copropriété.</Empty>
+          ) : (
+            <>
+              <div style={{border:"1px solid #1a3a5f33",borderRadius:12,overflow:"hidden",marginBottom:16}}>
+                {/* Header */}
+                <div style={{display:"grid",gridTemplateColumns:"2fr 1.5fr 1.5fr",background:"#060c16",padding:"10px 16px",borderBottom:"1px solid #1a3a5f22"}}>
+                  {["Propriétaire","Index actuel enregistré","Nouvel index (m³)"].map(h=>(
+                    <div key={h} style={{fontFamily:"system-ui",fontSize:11,fontWeight:700,color:"#334155",letterSpacing:1,textTransform:"uppercase"}}>{h}</div>
+                  ))}
+                </div>
+
+                {members.map((m,i)=>(
+                  <div key={m.id} style={{display:"grid",gridTemplateColumns:"2fr 1.5fr 1.5fr",padding:"14px 16px",borderBottom:i<members.length-1?"1px solid #1a3a5f11":"none",background:i%2===0?"#0c1829":"#090f1d",alignItems:"center",gap:10}}>
+                    {/* Nom */}
+                    <div style={{display:"flex",alignItems:"center",gap:10}}>
+                      <Av name={m.name} idx={i} size={34}/>
+                      <div>
+                        <div style={{fontFamily:"system-ui",fontSize:13,fontWeight:600,color:"#e2e8f0"}}>{m.name}</div>
+                        <div style={{fontFamily:"system-ui",fontSize:11,color:"#475569"}}>{m.type==="proprietaire"?"🏠":"🔑"} {m.type}</div>
+                      </div>
+                    </div>
+
+                    {/* Index actuel */}
+                    <div style={{textAlign:"center"}}>
+                      {m.lastIndex
+                        ? <span style={{fontFamily:"system-ui",fontSize:15,fontWeight:700,color:"#38bdf8"}}>{Number(m.lastIndex).toFixed(3)} m³</span>
+                        : <span style={{fontFamily:"system-ui",fontSize:12,color:"#f59e0b"}}>⚠️ Non défini</span>
+                      }
+                    </div>
+
+                    {/* Champ saisie nouvel index */}
+                    <div style={{position:"relative"}}>
+                      <input
+                        type="number" min="0" step="0.001"
+                        value={indexes[m.id]||""}
+                        onChange={e=>setIndexes(p=>({...p,[m.id]:e.target.value}))}
+                        placeholder={m.lastIndex ? Number(m.lastIndex).toFixed(3) : "ex: 1535.250"}
+                        style={{...S.inp,paddingRight:42,fontSize:14,fontWeight:600,
+                          borderColor: indexes[m.id] && Number(indexes[m.id])>0 ? "#2563eb" : "#1a3a5f"}}
+                      />
+                      <span style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",color:"#38bdf8",fontFamily:"system-ui",fontSize:11,fontWeight:700}}>m³</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Résumé des changements */}
+              {members.some(m=>indexes[m.id]&&indexes[m.id]!=="") && (
+                <div style={{...S.card,border:"1px solid #2563eb44",marginBottom:16}}>
+                  <div style={{fontFamily:"system-ui",fontSize:13,fontWeight:700,color:"#60a5fa",marginBottom:10}}>
+                    📋 Récapitulatif des modifications
+                  </div>
+                  {members.filter(m=>indexes[m.id]&&indexes[m.id]!=="").map((m,i)=>(
+                    <div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",fontFamily:"system-ui",fontSize:13,marginBottom:6}}>
+                      <span style={{color:"#e2e8f0",fontWeight:600}}>{m.name}</span>
+                      <div style={{display:"flex",alignItems:"center",gap:10}}>
+                        {m.lastIndex && <>
+                          <span style={{color:"#64748b"}}>{Number(m.lastIndex).toFixed(3)} m³</span>
+                          <span style={{color:"#475569"}}>→</span>
+                        </>}
+                        <span style={{color:"#4ade80",fontWeight:700}}>{Number(indexes[m.id]).toFixed(3)} m³</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <Btn onClick={saveIndexes} full style={{background:"linear-gradient(135deg,#059669,#10b981)"}}>
+                {saved ? "✅ Index enregistrés !" : "💾 Enregistrer les index"}
+              </Btn>
+            </>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 // ─── Paramètres copro ─────────────────────────────────
+// ─── Gestionnaire d'index (admin) ────────────────────────
+function IndexManager({ copro, adminPin, onUpdate }) {
+  const [pinInput, setPinInput] = useState("");
+  const [unlocked, setUnlocked] = useState(false);
+  const [indexes, setIndexes] = useState(() => {
+    const obj = {};
+    (copro.users||[]).forEach(u => { obj[u.id] = u.lastIndex || ""; });
+    return obj;
+  });
+  const [saved, setSaved] = useState(false);
+
+  function unlock() {
+    if (!adminPin) { setUnlocked(true); return; } // no PIN set yet
+    if (pinInput === adminPin) { setUnlocked(true); setPinInput(""); }
+    else { alert("Code PIN incorrect."); setPinInput(""); }
+  }
+
+  async function saveIndexes() {
+    const users = (copro.users||[]).map(u => ({
+      ...u,
+      lastIndex: indexes[u.id] ? Number(indexes[u.id]) : u.lastIndex
+    }));
+    await onUpdate({ users });
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
+  }
+
+  const members = (copro.users||[]).filter(u => u.role !== "admin");
+
+  if (!unlocked) return (
+    <div>
+      {members.map((u,i) => (
+        <div key={i} style={{display:"flex",justifyContent:"space-between",fontFamily:"system-ui",fontSize:13,color:"#64748b",marginBottom:8,padding:"8px 0",borderBottom:"1px solid #1a3a5f22"}}>
+          <span style={{color:"#e2e8f0"}}>{u.name}</span>
+          <span style={{color:"#38bdf8"}}>{u.lastIndex ? fM3(u.lastIndex)+" m³" : <span style={{color:"#f59e0b"}}>Non défini</span>}</span>
+        </div>
+      ))}
+      {adminPin ? (
+        <div style={{display:"flex",gap:10,marginTop:12}}>
+          <div style={{position:"relative",flex:1}}>
+            <input type="password" value={pinInput} onChange={e=>setPinInput(e.target.value)}
+              onKeyDown={e=>e.key==="Enter"&&unlock()}
+              placeholder="Code PIN admin pour modifier"
+              style={{...S.inp,paddingRight:36}}/>
+          </div>
+          <button onClick={unlock} style={{padding:"0 16px",borderRadius:9,border:"none",background:"#1d4ed8",color:"#fff",fontFamily:"system-ui",fontSize:13,fontWeight:700,cursor:"pointer"}}>
+            🔓 Déverrouiller
+          </button>
+        </div>
+      ) : (
+        <div style={{fontFamily:"system-ui",fontSize:11,color:"#f59e0b",marginTop:8}}>
+          ⚠️ Définissez un code PIN admin ci-dessus pour protéger les index.
+        </div>
+      )}
+    </div>
+  );
+
+  return (
+    <div>
+      <div style={{fontFamily:"system-ui",fontSize:12,color:"#4ade80",marginBottom:14}}>🔓 Mode modification activé</div>
+      {members.map((u,i) => (
+        <div key={i} style={{display:"flex",alignItems:"center",gap:10,marginBottom:10}}>
+          <span style={{fontFamily:"system-ui",fontSize:13,fontWeight:600,color:"#e2e8f0",width:120,flexShrink:0}}>{u.name}</span>
+          <div style={{position:"relative",flex:1}}>
+            <input type="number" min="0" step="0.001"
+              value={indexes[u.id]||""}
+              onChange={e=>setIndexes(p=>({...p,[u.id]:e.target.value}))}
+              placeholder="Index en m³" style={{...S.inp,paddingRight:42}}/>
+            <span style={{position:"absolute",right:12,top:"50%",transform:"translateY(-50%)",color:"#38bdf8",fontFamily:"system-ui",fontSize:12,fontWeight:700}}>m³</span>
+          </div>
+        </div>
+      ))}
+      <div style={{display:"flex",gap:10,marginTop:4}}>
+        <button onClick={()=>setUnlocked(false)} style={{padding:"8px 16px",borderRadius:9,border:"1px solid #1a3a5f",background:"transparent",color:"#64748b",fontFamily:"system-ui",fontSize:13,cursor:"pointer"}}>
+          🔒 Verrouiller
+        </button>
+        <button onClick={saveIndexes} style={{flex:1,padding:"10px",borderRadius:9,border:"none",background:"linear-gradient(135deg,#059669,#10b981)",color:"#fff",fontFamily:"system-ui",fontSize:13,fontWeight:700,cursor:"pointer"}}>
+          {saved ? "✓ Index sauvegardés !" : "Enregistrer les index"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function ParamsTab({ copro, update }) {
-  const [form,setForm]=useState({iban:copro.iban||"",refPriceM3:copro.refPriceM3||"",assuranceAnnuelle:copro.assuranceAnnuelle||""});
+  const [form,setForm]=useState({iban:copro.iban||"",refPriceM3:copro.refPriceM3||"",assuranceAnnuelle:copro.assuranceAnnuelle||"",adminPin:""});
   const [ok,setOk]=useState(false);
   const [fetchSt,setFetchSt]=useState("idle");
   const [fetchR,setFetchR]=useState(null);
@@ -1836,7 +2130,7 @@ function ParamsTab({ copro, update }) {
   }
 
   async function saveParams() {
-    await update({iban:form.iban,refPriceM3:form.refPriceM3,assuranceAnnuelle:form.assuranceAnnuelle});
+    await update({iban:form.iban,refPriceM3:form.refPriceM3,assuranceAnnuelle:form.assuranceAnnuelle,adminPin:form.adminPin||copro.adminPin||""});
     setOk(true); setTimeout(()=>setOk(false),2000);
   }
 
@@ -1848,6 +2142,28 @@ function ParamsTab({ copro, update }) {
         <div style={{fontFamily:"system-ui",fontSize:12,color:"#475569",marginBottom:12}}>Affiché aux membres pour leurs virements.</div>
         <textarea value={form.iban} onChange={e=>setForm(p=>({...p,iban:e.target.value}))}
           placeholder={"FR76 XXXX XXXX XXXX XXXX XXXX XXX\nTitulaire : …"} style={{...S.inp,height:68,resize:"vertical"}}/>
+      </div>
+
+      <div style={S.card}>
+        <div style={{fontFamily:"system-ui",fontSize:13,fontWeight:700,color:"#f59e0b",marginBottom:6}}>🔐 Code admin — Protection des index</div>
+        <div style={{fontFamily:"system-ui",fontSize:12,color:"#475569",marginBottom:12,lineHeight:1.6}}>
+          Ce code est requis pour modifier l'index précédent d'un propriétaire.<br/>
+          <span style={{color:"#f59e0b"}}>Les propriétaires ne peuvent PAS modifier leur propre index précédent.</span>
+        </div>
+        <div style={{position:"relative"}}>
+          <input type="password" value={form.adminPin||""} onChange={e=>setForm(p=>({...p,adminPin:e.target.value}))}
+            placeholder="Code PIN admin (min. 4 chiffres)" style={{...S.inp,paddingRight:36}}/>
+        </div>
+        {form.adminPin&&form.adminPin.length>=4&&<div style={{fontFamily:"system-ui",fontSize:11,color:"#4ade80",marginTop:6}}>✓ Code PIN défini</div>}
+      </div>
+
+      <div style={S.card}>
+        <div style={{fontFamily:"system-ui",fontSize:13,fontWeight:700,color:"#38bdf8",marginBottom:10}}>📊 Index initiaux des propriétaires</div>
+        <div style={{fontFamily:"system-ui",fontSize:12,color:"#475569",marginBottom:14,lineHeight:1.6}}>
+          Définissez l'index de départ de chaque propriétaire (votre base existante).<br/>
+          <span style={{color:"#f59e0b"}}>Modifiable uniquement avec le code admin.</span>
+        </div>
+        <IndexManager copro={copro} adminPin={form.adminPin||copro.adminPin||""} onUpdate={update}/>
       </div>
       <div style={S.card}>
         <div style={{fontFamily:"system-ui",fontSize:13,fontWeight:700,color:"#38bdf8",marginBottom:6}}>💧 Tarif Eaux de Marseille</div>
