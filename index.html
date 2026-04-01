@@ -156,24 +156,20 @@ function saveLocalOnly(db) {
 }
 
 // ── Sauvegarde complète (local + Firebase) ──────────────
-let _saveDebounce = null;
 async function saveSync(db) {
   if (!db?.superAdmin) return;
   // 1. Local SYNCHRONE immédiat
   saveLocalOnly(db);
-  // 2. Firebase avec debounce 1.5s
-  if (_saveDebounce) clearTimeout(_saveDebounce);
-  _saveDebounce = setTimeout(async () => {
-    try {
-      const ok = await initFirebase();
-      if (ok && _fbRef) {
-        await _fbRef.set(db);
-        console.log("☁️ Firebase sync OK");
-      }
-    } catch(e) {
-      console.warn("Firebase write failed (local OK):", e.message);
+  // 2. Firebase IMMÉDIAT (pas de debounce — on veut la sync en temps réel)
+  try {
+    const ok = await initFirebase();
+    if (ok && _fbRef) {
+      await _fbRef.set(db);
+      console.log("☁️ Firebase sync OK —", new Date().toLocaleTimeString());
     }
-  }, 1500);
+  } catch(e) {
+    console.warn("Firebase write failed (local OK):", e.message);
+  }
 }
 
 // ── Chargement initial (Firebase + local) ───────────────
@@ -314,10 +310,12 @@ function App() {
   // persist — local immédiat + Firebase async
   const persist = useCallback((newDb) => {
     if (!newDb?.superAdmin) return;
-    dbRef.current = newDb;
-    _setDb(newDb);
+    // Toujours ajouter un timestamp pour détecter les changements même si le score est identique
+    const stamped = { ...newDb, _updatedAt: Date.now() };
+    dbRef.current = stamped;
+    _setDb(stamped);
     setLastSaved(Date.now());
-    saveSync(newDb); // local sync + Firebase async
+    saveSync(stamped); // local sync + Firebase async
   }, []);
 
   const persistCopro = useCallback((copro) => {
@@ -369,12 +367,19 @@ function App() {
         const cur = dbRef.current;
         // Mettre à jour si Firebase a des données et que le score est >= local
         // (inclut le cas où local est vide = score 0)
-        if (remoteDb?.superAdmin && score(remoteDb) >= score(cur)) {
-          console.log("🔄 Sync Firebase → local");
-          saveLocalOnly(remoteDb);
-          dbRef.current = remoteDb;
-          _setDb(remoteDb);
-          setLastSaved(Date.now());
+        if (remoteDb?.superAdmin) {
+          const remoteTs = remoteDb._updatedAt || 0;
+          const localTs  = cur?._updatedAt || 0;
+          const remoteScore = score(remoteDb);
+          const localScore  = score(cur);
+          // Mettre à jour si : données distantes plus récentes OU score plus élevé
+          if (remoteTs > localTs || remoteScore > localScore) {
+            console.log("🔄 Sync Firebase → local (remote:", remoteTs, "local:", localTs, ")");
+            saveLocalOnly(remoteDb);
+            dbRef.current = remoteDb;
+            _setDb(remoteDb);
+            setLastSaved(Date.now());
+          }
         }
       });
     }, 3000); // attendre 3s après le chargement initial
