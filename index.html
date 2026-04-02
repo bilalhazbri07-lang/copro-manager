@@ -725,47 +725,16 @@ function Dashboard({ copro, user, isSyndic, balance, members, update }) {
                   <div style={{fontFamily:"system-ui",fontSize:11,color:"#475569",marginTop:8,fontStyle:"italic",marginBottom:12}}>✉️ Le syndic confirmera la réception dès que le virement arrivera.</div>
 
                   {!p.signaled ? (
-                    <div style={{display:"flex",flexDirection:"column",gap:8}}>
-                      {/* Bouton virement direct — ouvre l'app bancaire */}
-                      {copro.iban && (() => {
-                        // Extraire l'IBAN brut (première ligne, sans espaces)
-                        const rawIban = copro.iban.split("\n")[0].replace(/\s/g,"").toUpperCase();
-                        const isValidIban = /^[A-Z]{2}[0-9]{2}[A-Z0-9]+$/.test(rawIban);
-                        const ref = encodeURIComponent(`${p.appelTitle} ${user.name}`);
-                        const amt = Number(p.amount).toFixed(2);
-                        const paytoUrl = `payto://iban/${rawIban}?amount=EUR:${amt}&message=${ref}`;
-                        return isValidIban ? (
-                          <a href={paytoUrl}
-                            style={{display:"block",width:"100%",padding:"12px",borderRadius:10,border:"none",background:"linear-gradient(135deg,#059669,#10b981)",color:"#fff",fontFamily:"system-ui",fontSize:15,fontWeight:700,cursor:"pointer",textAlign:"center",textDecoration:"none"}}>
-                            🏦 Effectuer le virement — {fEUR(p.amount)}
-                          </a>
-                        ) : null;
-                      })()}
-
-                      {/* Bouton "Tout copier" pour coller dans son appli bancaire */}
-                      <CopyBtn
-                        text={`Bénéficiaire : ${copro.iban}
-Montant : ${fEUR(p.amount)}
-Référence : ${p.appelTitle} — ${user.name}`}
-                        label="Copier tous les détails du virement"
-                      />
-
-                      {/* Confirmation manuelle */}
-                      <button onClick={async()=>{
+                    <SepaVirement copro={copro} payment={p} user={user} appelTitle={p.appelTitle}
+                      onSignal={async()=>{
                         const appels=(copro.appels||[]).map(a=>{
-                          const hasPayment=(a.payments||[]).some(px=>px.owner===user.id&&!px.paid&&Number(px.amount)===Number(p.amount));
-                          if(!hasPayment) return a;
-                          const payments=(a.payments||[]).map(px=>
-                            (px.owner===user.id&&Number(px.amount)===Number(p.amount))
-                              ?{...px,signaled:true,signaledAt:new Date().toISOString()}:px
-                          );
+                          const has=(a.payments||[]).some(px=>px.owner===user.id&&!px.paid&&Number(px.amount)===Number(p.amount));
+                          if(!has) return a;
+                          const payments=(a.payments||[]).map(px=>(px.owner===user.id&&Number(px.amount)===Number(p.amount))?{...px,signaled:true,signaledAt:new Date().toISOString()}:px);
                           return {...a,payments};
                         });
                         await update({appels});
-                      }} style={{width:"100%",padding:"10px",borderRadius:9,border:"1px solid #2563eb44",background:"#0a1e38",color:"#60a5fa",fontFamily:"system-ui",fontSize:13,fontWeight:600,cursor:"pointer"}}>
-                        ✓ J'ai déjà effectué le virement — notifier le syndic
-                      </button>
-                    </div>
+                      }}/>
                   ):(
                     <div style={{background:"#1d4ed822",borderRadius:9,padding:"12px",border:"1px solid #2563eb44",textAlign:"center"}}>
                       <div style={{fontFamily:"system-ui",fontSize:14,fontWeight:700,color:"#60a5fa",marginBottom:4}}>✓ Virement signalé au syndic</div>
@@ -979,14 +948,45 @@ function InlineReleveForm({ appels, user, copro, update }) {
                     </div>
                   ))}
                 </div>
-                {pm3&&<div style={{background:"#060c16",borderRadius:8,padding:"10px",fontFamily:"system-ui",fontSize:13,textAlign:"center"}}>
+                {pm3&&<div style={{background:"#060c16",borderRadius:8,padding:"10px",fontFamily:"system-ui",fontSize:13,textAlign:"center",marginBottom:12}}>
                   {fM3(r.m3)} m³ × {pm3 ? pm3.toFixed(5) : (_bill>0&&_vol>0?(_bill/_vol).toFixed(5):"?")} €/m³ = <strong style={{color:"#f59e0b"}}>{pm3 ? fEUR(r.m3*pm3) : "—"}</strong>
                   <div style={{color:"#475569",fontSize:11,marginTop:2}}>Estimation — montant exact calculé quand tous ont saisi</div>
                 </div>}
-                <div style={{textAlign:"right",marginTop:10}}>
+
+                {/* Bouton virement anticipé — dès que l'index est saisi */}
+                {pm3 && r.m3 > 0 && (() => {
+                  const estAmount = Math.round(r.m3 * pm3 * 100) / 100;
+                  // Créer un objet payment factice pour SepaVirement
+                  const fakePmt = { amount: estAmount, owner: user.id };
+                  // Vérifier si déjà signalé
+                  const alreadySignaled = (a.payments||[]).find(px=>px.owner===user.id&&px.signaled);
+                  return alreadySignaled ? (
+                    <div style={{background:"#1d4ed822",borderRadius:9,padding:"12px",border:"1px solid #2563eb44",textAlign:"center",marginBottom:12}}>
+                      <div style={{fontFamily:"system-ui",fontSize:14,fontWeight:700,color:"#60a5fa",marginBottom:4}}>✓ Virement signalé au syndic</div>
+                      <div style={{fontFamily:"system-ui",fontSize:12,color:"#475569"}}>En attente de confirmation — vous serez marqué "payé" dès réception.</div>
+                    </div>
+                  ) : (
+                    <div style={{marginBottom:12}}>
+                      <SepaVirement copro={copro} payment={fakePmt} user={user} appelTitle={a.title}
+                        onSignal={async()=>{
+                          const appels=(copro.appels||[]).map(ax=>{
+                            if(ax.id!==a.id) return ax;
+                            // Mettre à jour ou créer le payment pour ce membre
+                            const payments=(ax.payments||[]).map(px=>
+                              px.owner===user.id?{...px,signaled:true,signaledAt:new Date().toISOString()}:px
+                            );
+                            return {...ax,payments};
+                          });
+                          await update({appels});
+                        }}/>
+                    </div>
+                  );
+                })()}
+
+                <div style={{textAlign:"right"}}>
                   <button onClick={()=>update({appels:(copro.appels||[]).map(x=>x.id!==a.id?x:{...x,releves:(x.releves||[]).filter(rv=>rv.ownerId!==user.id)})})}
                     style={{background:"none",border:"1px solid #1a3a5f",color:"#64748b",padding:"5px 14px",borderRadius:8,cursor:"pointer",fontFamily:"system-ui",fontSize:12}}>
-                    ✏️ Modifier
+                    ✏️ Modifier mon relevé
                   </button>
                 </div>
               </div>
@@ -1532,6 +1532,110 @@ function ParamsTab({ copro, update }) {
 // ═══════════════════════════════════════════════════════
 //  MICRO COMPOSANTS
 // ═══════════════════════════════════════════════════════
+
+// ─── Virement SEPA avec QR Code ────────────────────────────
+function SepaVirement({ copro, payment, user, appelTitle, onSignal }) {
+  const [showQR, setShowQR] = useState(false);
+  const [qrLoaded, setQrLoaded] = useState(false);
+  const qrRef = useRef(null);
+
+  // Extraire l'IBAN propre (1ère ligne, sans espaces)
+  const rawIban = (copro.iban||"").split("\n")[0].replace(/\s/g,"").toUpperCase();
+  // Extraire le nom du titulaire (2ème ligne si dispo)
+  const ibanLines = (copro.iban||"").split("\n");
+  const benefName = ibanLines[1] ? ibanLines[1].replace(/^Titulaire\s*:\s*/i,"").trim() : "Copropriete";
+  const amount = Number(payment.amount).toFixed(2);
+  const ref = `${appelTitle} ${user.name}`.slice(0,35); // max 35 chars SEPA
+
+  // Format QR SEPA (EPC069-12 standard)
+  const sepaQrData = [
+    "BCD",        // Service Tag
+    "002",        // Version
+    "1",          // Encoding UTF-8
+    "SCT",        // SEPA Credit Transfer
+    "",           // BIC (optionnel)
+    benefName.slice(0,70),  // Nom bénéficiaire
+    rawIban,      // IBAN
+    `EUR${amount}`, // Montant
+    "",           // Purpose (vide)
+    "",           // Reference structurée (vide)
+    ref,          // Reference non structurée
+    "CoproManager" // Display text
+  ].join("\n");
+
+  useEffect(() => {
+    if (!showQR) return;
+    // Charger QRCode.js depuis CDN si pas encore chargé
+    if (window.QRCode) { setQrLoaded(true); return; }
+    const s = document.createElement("script");
+    s.src = "https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js";
+    s.onload = () => setQrLoaded(true);
+    document.head.appendChild(s);
+  }, [showQR]);
+
+  useEffect(() => {
+    if (!qrLoaded || !showQR || !qrRef.current) return;
+    qrRef.current.innerHTML = "";
+    try {
+      new window.QRCode(qrRef.current, {
+        text: sepaQrData,
+        width: 220, height: 220,
+        colorDark: "#000000",
+        colorLight: "#ffffff",
+        correctLevel: window.QRCode.CorrectLevel.M,
+      });
+    } catch(e) { console.warn("QR error:", e); }
+  }, [qrLoaded, showQR, sepaQrData]);
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:8}}>
+
+      {/* Bouton QR Code SEPA */}
+      <button onClick={()=>setShowQR(!showQR)}
+        style={{width:"100%",padding:"13px",borderRadius:10,border:"none",
+          background:showQR?"#1d4ed8":"linear-gradient(135deg,#059669,#10b981)",
+          color:"#fff",fontFamily:"system-ui",fontSize:15,fontWeight:700,cursor:"pointer"}}>
+        {showQR ? "✕ Fermer le QR code" : "📱 Scanner pour virer — " + fEUR(payment.amount)}
+      </button>
+
+      {/* QR Code SEPA */}
+      {showQR && (
+        <div style={{background:"#fff",borderRadius:14,padding:"20px",textAlign:"center"}}>
+          <div style={{fontFamily:"system-ui",fontSize:12,color:"#334155",marginBottom:12,fontWeight:600}}>
+            📱 Ouvrez votre appli bancaire → Virement → Scanner QR
+          </div>
+          <div ref={qrRef} style={{display:"inline-block",borderRadius:8,overflow:"hidden"}}/>
+          {!qrLoaded && <div style={{color:"#64748b",fontSize:12,padding:"40px 0"}}>Chargement du QR code…</div>}
+          <div style={{fontFamily:"system-ui",fontSize:11,color:"#475569",marginTop:12,lineHeight:1.6}}>
+            Compatible : BNP, Crédit Agricole, Société Générale,<br/>
+            Boursorama, Revolut, N26, et toutes les banques SEPA
+          </div>
+          {/* Détails en texte pour vérification */}
+          <div style={{background:"#f8fafc",borderRadius:8,padding:"10px",marginTop:12,textAlign:"left"}}>
+            <div style={{fontFamily:"monospace",fontSize:11,color:"#334155",lineHeight:1.8}}>
+              <div>IBAN : <strong>{rawIban.replace(/(.{4})/g,"$1 ").trim()}</strong></div>
+              <div>Montant : <strong>{fEUR(payment.amount)}</strong></div>
+              <div>Référence : <strong>{ref}</strong></div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Copier tous les détails */}
+      <CopyBtn
+        text={`IBAN : ${rawIban}\nMontant : ${fEUR(payment.amount)}\nRéférence : ${ref}`}
+        label="Copier les coordonnées bancaires"
+      />
+
+      {/* Notifier le syndic */}
+      <button onClick={onSignal}
+        style={{width:"100%",padding:"10px",borderRadius:9,border:"1px solid #2563eb44",
+          background:"#0a1e38",color:"#60a5fa",fontFamily:"system-ui",fontSize:13,fontWeight:600,cursor:"pointer"}}>
+        ✓ J'ai déjà effectué le virement — notifier le syndic
+      </button>
+    </div>
+  );
+}
 
 // Bouton copier dans le presse-papiers
 function CopyBtn({ text, label="Copier" }) {
