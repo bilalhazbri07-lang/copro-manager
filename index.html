@@ -9,16 +9,10 @@
     body { background:#07090f; }
     #root { min-height:100vh; }
     input,select,textarea,button { font-family:system-ui,sans-serif; }
-    #splash { display:flex; align-items:center; justify-content:center; height:100vh;
-      flex-direction:column; gap:14px; font-family:Georgia,serif; color:#3b82f6; font-size:18px; }
-    .sp { width:38px; height:38px; border:3px solid #1a3a5f;
-      border-top-color:#3b82f6; border-radius:50%; animation:sp 0.8s linear infinite; }
-    @keyframes sp { to { transform:rotate(360deg); } }
   </style>
 </head>
 <body>
-  <div id="splash"><div class="sp"></div><div>Chargement…</div></div>
-  <div id="root" style="display:none"></div>
+  <div id="root"></div>
   <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone@7.23.5/babel.min.js"></script>
@@ -26,12 +20,8 @@
 const { useState, useEffect, useRef, useCallback } = React;
 
 // ═══════════════════════════════════════════════════════
-//  STORAGE — Firebase Realtime Database
-//  Sync temps réel entre tous les appareils
-//  + localStorage comme sauvegarde locale permanente
+//  STORAGE — Firebase (sync) + localStorage (backup)
 // ═══════════════════════════════════════════════════════
-
-// ── Config Firebase ─────────────────────────────────────
 const FIREBASE_CONFIG = {
   apiKey:            "AIzaSyABWFCesKWCftwhUHm9zzfvW-ef-rTVWrY",
   authDomain:        "copro-manager13.firebaseapp.com",
@@ -41,70 +31,13 @@ const FIREBASE_CONFIG = {
   messagingSenderId: "850361891714",
   appId:             "1:850361891714:web:65052fef9a7d71f92ced9b",
 };
-const FB_PATH = "copro/data";
+const FB_PATH  = "copro/data";
+const LS_KEY   = "COPRO_MASTER_V1";
+const LS_BCK   = "COPRO_MASTER_V1_BCK";
+const EMPTY    = { superAdmin: null, copros: [] };
 
-// ── Clés localStorage (backup local permanent) ──────────
-const LS_PRIMARY   = "COPRO_MASTER_V1";
-const LS_BACKUP    = "COPRO_MASTER_V1_BCK";
-const LS_EMERGENCY = "COPRO_MASTER_V1_EMG";
-const WS_KEY       = "COPRO_WS_V1";
-
-const EMPTY = { superAdmin: null, copros: [] };
-
-// ── Calcul eau (logique exacte) ────────────────────────
-// 1. Chaque propriétaire saisit son index actuel
-// 2. Conso brute = index actuel - index précédent
-// 3. Total conso brute vs total facture → différence répartie également
-// 4. Conso ajustée = conso brute - (diff / nb propriétaires)
-// 5. Prix m³ = montant facture / m³ facturés
-// 6. Part = conso ajustée × prix m³
-function calcEauParts(releves, totalBill, invoiceM3) {
-  const n = releves.length;
-  if (!n || !totalBill || !invoiceM3) return null;
-
-  // Conso brute de chaque propriétaire
-  const consos = releves.map(r => Number(r.m3));
-  const totalConsoRelevee = consos.reduce((s,v)=>s+v, 0);
-
-  // Différence entre total relevé et total facturé → répartie également
-  const diff = Number(invoiceM3) - totalConsoRelevee;
-  const adjustPerOwner = diff / n;
-
-  // Conso ajustée de chaque propriétaire
-  const consosAjustees = consos.map(c => Math.max(0, c + adjustPerOwner));
-
-  // Prix m³ exact
-  const priceM3 = Number(totalBill) / Number(invoiceM3);
-
-  // Montants bruts
-  const rawAmounts = consosAjustees.map(c => c * priceM3);
-
-  // Arrondi avec ajustement du dernier pour total exact
-  const rounded = rawAmounts.map(v => Math.round(v * 100) / 100);
-  const totalRounded = rounded.reduce((s,v)=>s+v, 0);
-  const lastAdj = Math.round((Number(totalBill) - totalRounded) * 100) / 100;
-  rounded[rounded.length-1] = Math.round((rounded[rounded.length-1] + lastAdj) * 100) / 100;
-
-  return releves.map((r, i) => ({
-    owner:       r.ownerId,
-    ownerName:   r.ownerName,
-    amount:      rounded[i],
-    m3Raw:       consos[i],
-    m3Ajuste:    Math.round(consosAjustees[i] * 1000) / 1000,
-    adjustment:  Math.round(adjustPerOwner * 1000) / 1000,
-    currentIndex: r.currentIndex,
-    lastIndex:   r.lastIndex,
-    priceM3:     priceM3,
-    paid:        false,
-    paidDate:    null,
-  }));
-}
-
-// ── Firebase init ───────────────────────────────────────
-let _fbDB  = null;
-let _fbRef = null;
-let _fbReady = false;
-
+// ── Firebase ────────────────────────────────────────────
+let _fbRef = null, _fbReady = false;
 async function initFirebase() {
   if (_fbReady) return true;
   try {
@@ -113,75 +46,51 @@ async function initFirebase() {
       await loadScript("https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js");
       window.__fb_loaded = true;
     }
-    if (!window.__fb_app) {
-      window.__fb_app = firebase.initializeApp(FIREBASE_CONFIG);
-    }
-    _fbDB  = firebase.database();
-    _fbRef = _fbDB.ref(FB_PATH);
+    if (!window.__fb_app) window.__fb_app = firebase.initializeApp(FIREBASE_CONFIG);
+    _fbRef = firebase.database().ref(FB_PATH);
     _fbReady = true;
-    console.log("✅ Firebase connecté");
     return true;
-  } catch(e) {
-    console.warn("Firebase init failed:", e.message);
-    return false;
-  }
+  } catch(e) { console.warn("Firebase init:", e.message); return false; }
 }
-
 function loadScript(src) {
-  return new Promise((resolve, reject) => {
-    if (document.querySelector(`script[src="${src}"]`)) { resolve(); return; }
+  return new Promise((res, rej) => {
+    if (document.querySelector(`script[src="${src}"]`)) { res(); return; }
     const s = document.createElement("script");
-    s.src = src;
-    s.onload = resolve;
-    s.onerror = reject;
+    s.src = src; s.onload = res; s.onerror = rej;
     document.head.appendChild(s);
   });
 }
 
-// ── Score (choisir la meilleure version) ────────────────
-function score(d) {
+// ── Score (meilleure version = plus de données) ─────────
+function dbScore(d) {
   if (!d?.superAdmin) return 0;
   return 1 + (d.copros||[]).reduce((s,c)=>
-    s + (c.users||[]).length*100 + (c.appels||[]).length*10 + (c.depenses||[]).length, 0);
+    s+(c.users||[]).length*100+(c.appels||[]).length*10+(c.depenses||[]).length, 0);
 }
 
-// ── Sauvegarde locale synchrone ─────────────────────────
-function saveLocalOnly(db) {
+// ── Sauvegarde locale ────────────────────────────────────
+function saveLocal(db) {
   if (!db?.superAdmin) return;
-  const json = JSON.stringify(db);
-  try { localStorage.setItem(LS_PRIMARY,   json); } catch {}
-  try { localStorage.setItem(LS_BACKUP,    json); } catch {}
-  try { localStorage.setItem(LS_EMERGENCY, json); } catch {}
-  try { window.storage.set(WS_KEY, json).catch(()=>{}); } catch {}
+  const j = JSON.stringify(db);
+  try { localStorage.setItem(LS_KEY, j); } catch {}
+  try { localStorage.setItem(LS_BCK, j); } catch {}
 }
 
 // ── Sauvegarde complète (local + Firebase) ──────────────
-async function saveSync(db) {
+async function saveAll(db) {
   if (!db?.superAdmin) return;
-  // 1. Local SYNCHRONE immédiat
-  saveLocalOnly(db);
-  // 2. Firebase IMMÉDIAT (pas de debounce — on veut la sync en temps réel)
+  saveLocal(db);
   try {
     const ok = await initFirebase();
-    if (ok && _fbRef) {
-      await _fbRef.set(db);
-      console.log("☁️ Firebase sync OK —", new Date().toLocaleTimeString());
-    }
-  } catch(e) {
-    console.warn("Firebase write failed (local OK):", e.message);
-  }
+    if (ok && _fbRef) { await _fbRef.set(db); console.log("☁️ Firebase OK", new Date().toLocaleTimeString()); }
+  } catch(e) { console.warn("Firebase write:", e.message); }
 }
 
-// ── Chargement initial (Firebase + local) ───────────────
-async function load() {
+// ── Chargement (Firebase prioritaire) ───────────────────
+async function loadDB() {
   let best = null, bestScore = 0;
-
-  function tryUpdate(d) {
-    const s = score(d);
-    if (s > bestScore) { best = d; bestScore = s; }
-  }
-
-  // 1. Firebase (source la plus à jour)
+  const tryUpdate = d => { const s = dbScore(d); if (s > bestScore) { best=d; bestScore=s; } };
+  // 1. Firebase
   try {
     const ok = await initFirebase();
     if (ok && _fbRef) {
@@ -189,106 +98,87 @@ async function load() {
       const d = snap.val();
       if (d?.superAdmin) { tryUpdate(d); console.log("☁️ Firebase chargé"); }
     }
-  } catch(e) { console.warn("Firebase load failed, fallback local:", e.message); }
-
+  } catch(e) { console.warn("Firebase load:", e.message); }
   // 2. localStorage
-  for (const k of [LS_PRIMARY, LS_BACKUP, LS_EMERGENCY]) {
-    try { const r = localStorage.getItem(k); if (r) tryUpdate(JSON.parse(r)); } catch {}
+  for (const k of [LS_KEY, LS_BCK]) {
+    try { const r=localStorage.getItem(k); if(r) tryUpdate(JSON.parse(r)); } catch {}
   }
-
-  // 3. window.storage
-  try {
-    const r = await window.storage.get(WS_KEY);
-    if (r?.value) tryUpdate(JSON.parse(r.value));
-  } catch {}
-
-  // 4. Anciennes clés (migration)
-  for (const k of ["COPRO_A","COPRO_B","COPRO_C","copro-manager-autosave"]) {
-    try { const r = localStorage.getItem(k); if (r) tryUpdate(JSON.parse(r)); } catch {}
-    try { const r = await window.storage.get(k); if (r?.value) tryUpdate(JSON.parse(r.value)); } catch {}
-  }
-
-  if (best) {
-    console.log(`✅ Données chargées (score ${bestScore}): ${best.copros?.length||0} copros`);
-    saveSync(best);
-    return { ...EMPTY, ...best, copros: best.copros||[] };
-  }
+  if (best) { saveLocal(best); return { ...EMPTY, ...best, copros: best.copros||[] }; }
   return null;
 }
 
-// ── Écoute temps réel Firebase ──────────────────────────
-let _unsubscribe = null;
-async function startRealtimeSync(onUpdate) {
+// ── Sync temps réel Firebase ────────────────────────────
+let _unsubFb = null;
+async function startSync(onUpdate) {
   try {
     const ok = await initFirebase();
     if (!ok || !_fbRef) return;
-    _unsubscribe = _fbRef.on("value", snap => {
+    _unsubFb = _fbRef.on("value", snap => {
       const d = snap.val();
-      if (d?.superAdmin) {
-        saveLocalOnly(d); // sync locale silencieuse
-        onUpdate(d);
-      }
+      if (d?.superAdmin) { saveLocal(d); onUpdate(d); }
     });
-    console.log("🔄 Écoute temps réel active");
-  } catch(e) { console.warn("Realtime sync failed:", e.message); }
+    console.log("🔄 Sync temps réel active");
+  } catch(e) { console.warn("Sync:", e.message); }
 }
-function stopRealtimeSync() {
-  if (_fbRef && _unsubscribe) { _fbRef.off("value", _unsubscribe); _unsubscribe = null; }
-}
+function stopSync() { if (_fbRef && _unsubFb) { _fbRef.off("value", _unsubFb); _unsubFb = null; } }
 
-// Export JSON
+// Export / Import JSON
 function exportJSON(db) {
-  const blob = new Blob([JSON.stringify(db, null, 2)], { type:"application/json" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `copro-backup-${new Date().toISOString().slice(0,10)}.json`;
-  a.click();
-  URL.revokeObjectURL(url);
+  const b = new Blob([JSON.stringify(db, null, 2)], {type:"application/json"});
+  const a = Object.assign(document.createElement("a"), {href:URL.createObjectURL(b), download:`copro-backup-${new Date().toISOString().slice(0,10)}.json`});
+  a.click(); URL.revokeObjectURL(a.href);
 }
-
-// Import JSON
 function importJSON(file, onDone) {
   const r = new FileReader();
-  r.onload = e => {
-    try {
-      const d = JSON.parse(e.target.result);
-      if (d?.superAdmin) onDone(d);
-      else alert("Fichier invalide.");
-    } catch { alert("Erreur de lecture."); }
-  };
+  r.onload = e => { try { const d=JSON.parse(e.target.result); if(d?.superAdmin) onDone(d); else alert("Fichier invalide."); } catch { alert("Erreur lecture."); } };
   r.readAsText(file);
 }
 
-// ── Utilitaires ───────────────────────────────────────
-const uid   = () => Date.now().toString(36) + Math.random().toString(36).slice(2,6);
+// ═══════════════════════════════════════════════════════
+//  UTILITAIRES
+// ═══════════════════════════════════════════════════════
+const uid   = () => Date.now().toString(36)+Math.random().toString(36).slice(2,6);
 const fEUR  = n => Number(n).toLocaleString("fr-FR",{style:"currency",currency:"EUR"});
 const fDATE = s => new Date(s).toLocaleDateString("fr-FR",{day:"2-digit",month:"short",year:"numeric"});
 const fM3   = n => Number(n).toFixed(3);
 const TODAY = () => new Date().toISOString().slice(0,10);
 
-function hash(p) {
-  let h = 5381;
-  for (let i=0;i<p.length;i++) h=((h<<5)+h)^p.charCodeAt(i);
-  return (h>>>0).toString(16);
-}
+function hash(p) { let h=5381; for(let i=0;i<p.length;i++) h=((h<<5)+h)^p.charCodeAt(i); return (h>>>0).toString(16); }
 
 function splitEqual(total, n) {
+  if (!n) return [];
   const base = Math.round(total/n*100)/100;
   const arr = Array(n).fill(base);
-  const diff = Math.round((total - arr.reduce((s,v)=>s+v,0))*100)/100;
-  arr[n-1] = Math.round((arr[n-1]+diff)*100)/100;
+  arr[n-1] = Math.round((total - arr.slice(0,-1).reduce((s,v)=>s+v,0))*100)/100;
   return arr;
 }
 
-function splitByM3(consos, total) {
-  const tc = consos.reduce((s,v)=>s+v,0);
-  if (!tc) return Array(consos.length).fill(0);
-  const raw = consos.map(c=>(c/tc)*total);
-  const arr = raw.map(v=>Math.round(v*100)/100);
-  const diff = Math.round((total-arr.reduce((s,v)=>s+v,0))*100)/100;
-  arr[arr.length-1]=Math.round((arr[arr.length-1]+diff)*100)/100;
-  return arr;
+// ── Calcul eau — FONCTION UNIQUE ────────────────────────
+// Prix m³ = totalBill / invoiceM3 (volume officiel de la facture)
+// Conso de chaque membre = index actuel - index précédent
+// Ajustement : différence entre somme des consommations relevées et volume facturé,
+//              répartie également entre tous les membres
+// Part finale = conso ajustée × prix m³ (dernier ajusté pour total exact)
+function calcEauParts(releves, totalBill, invoiceM3) {
+  const n = releves.length;
+  if (!n || !totalBill || !invoiceM3) return null;
+  const pm3 = Number(totalBill) / Number(invoiceM3);
+  const consos = releves.map(r => Number(r.m3));
+  const totalReleve = consos.reduce((s,v)=>s+v, 0);
+  const diff = Number(invoiceM3) - totalReleve; // m³ non attribués
+  const adj = diff / n;                          // ajustement par membre
+  const consosAjustees = consos.map(c => Math.max(0, c + adj));
+  const raw = consosAjustees.map(c => c * pm3);
+  const rounded = raw.map(v => Math.round(v*100)/100);
+  const lastAdj = Math.round((Number(totalBill) - rounded.reduce((s,v)=>s+v,0))*100)/100;
+  rounded[rounded.length-1] = Math.round((rounded[rounded.length-1]+lastAdj)*100)/100;
+  return releves.map((r,i) => ({
+    owner: r.ownerId, ownerName: r.ownerName,
+    amount: rounded[i], m3: consos[i], m3Ajuste: Math.round(consosAjustees[i]*1000)/1000,
+    adjustment: Math.round(adj*1000)/1000, priceM3: pm3,
+    currentIndex: r.currentIndex, lastIndex: r.lastIndex,
+    paid: false, paidDate: null,
+  }));
 }
 
 // ═══════════════════════════════════════════════════════
@@ -298,157 +188,79 @@ function App() {
   const [db, _setDb]       = useState(null);
   const [screen, setScreen] = useState("boot");
   const [session, setSession] = useState(null);
-  const [lastSaved, setLastSaved] = useState(null); // timestamp dernière sauvegarde
-  const dbRef  = useRef(null);
-  const autoSaveTimer = useRef(null);
+  const [lastSaved, setLastSaved] = useState(null);
+  const dbRef = useRef(null);
+  const timerRef = useRef(null);
 
-  const setDb = useCallback((d) => {
-    dbRef.current = d;
-    _setDb(d);
+  const setDb = useCallback(d => { dbRef.current=d; _setDb(d); }, []);
+
+  const persist = useCallback(d => {
+    if (!d?.superAdmin) return;
+    const stamped = { ...d, _updatedAt: Date.now() };
+    dbRef.current = stamped; _setDb(stamped); setLastSaved(Date.now());
+    saveAll(stamped);
   }, []);
 
-  // persist — local immédiat + Firebase async
-  const persist = useCallback((newDb) => {
-    if (!newDb?.superAdmin) return;
-    // Toujours ajouter un timestamp pour détecter les changements même si le score est identique
-    const stamped = { ...newDb, _updatedAt: Date.now() };
-    dbRef.current = stamped;
-    _setDb(stamped);
-    setLastSaved(Date.now());
-    saveSync(stamped); // local sync + Firebase async
-  }, []);
-
-  const persistCopro = useCallback((copro) => {
-    const cur = dbRef.current;
-    if (!cur) return;
-    const newDb = { ...cur, copros: cur.copros.map(c=>c.id===copro.id?copro:c) };
-    persist(newDb);
+  const persistCopro = useCallback(copro => {
+    const cur = dbRef.current; if (!cur) return;
+    persist({ ...cur, copros: cur.copros.map(c=>c.id===copro.id?copro:c) });
   }, [persist]);
 
-  // ── Chargement initial ──
+  // Chargement initial
   useEffect(() => {
-    const FRESH = { ...EMPTY, superAdmin:{ name:"Super Admin", login:"admin", password:hash("admin123") }, copros:[] };
-    const t = setTimeout(() => { saveSync(FRESH); setDb(FRESH); setScreen("login"); }, 8000);
-
-    load().then(d => {
+    const FRESH = { ...EMPTY, superAdmin:{name:"Super Admin",login:"admin",password:hash("admin123")}, copros:[] };
+    const t = setTimeout(() => { persist(FRESH); setScreen("login"); }, 8000);
+    loadDB().then(d => {
       clearTimeout(t);
       const final = d || FRESH;
-      if (!d) saveSync(FRESH);
-      dbRef.current = final;
-      setDb(final);
-      setLastSaved(Date.now());
-      setScreen("login");
-    }).catch(() => {
-      clearTimeout(t);
-      saveSync(FRESH);
-      dbRef.current = FRESH;
-      setDb(FRESH);
-      setScreen("login");
-    });
+      if (!d) saveAll(FRESH);
+      dbRef.current = final; _setDb(final); setLastSaved(Date.now()); setScreen("login");
+    }).catch(() => { clearTimeout(t); persist(FRESH); setScreen("login"); });
   }, []);
 
-  // ── Auto-save toutes les 30 secondes ──
+  // Auto-save 30s
   useEffect(() => {
-    autoSaveTimer.current = setInterval(() => {
-      const cur = dbRef.current;
-      if (cur?.superAdmin) {
-        saveSync(cur);
-        setLastSaved(Date.now());
-      }
-    }, 30 * 1000);
-    return () => clearInterval(autoSaveTimer.current);
+    timerRef.current = setInterval(() => { const c=dbRef.current; if(c?.superAdmin) saveAll(c); }, 30000);
+    return () => clearInterval(timerRef.current);
   }, []);
 
-  // ── Écoute Firebase temps réel ──
+  // Sync temps réel Firebase
   useEffect(() => {
-    // Démarrer la sync temps réel après chargement initial
-    const timer = setTimeout(() => {
-      startRealtimeSync((remoteDb) => {
+    const t = setTimeout(() => {
+      startSync(remote => {
         const cur = dbRef.current;
-        // Mettre à jour si Firebase a des données et que le score est >= local
-        // (inclut le cas où local est vide = score 0)
-        if (remoteDb?.superAdmin) {
-          const remoteTs = remoteDb._updatedAt || 0;
-          const localTs  = cur?._updatedAt || 0;
-          const remoteScore = score(remoteDb);
-          const localScore  = score(cur);
-          // Mettre à jour si : données distantes plus récentes OU score plus élevé
-          if (remoteTs > localTs || remoteScore > localScore) {
-            console.log("🔄 Sync Firebase → local (remote:", remoteTs, "local:", localTs, ")");
-            saveLocalOnly(remoteDb);
-            dbRef.current = remoteDb;
-            _setDb(remoteDb);
-            setLastSaved(Date.now());
-          }
+        const rTs = remote._updatedAt||0, lTs = cur?._updatedAt||0;
+        if (remote?.superAdmin && (rTs>lTs || dbScore(remote)>dbScore(cur))) {
+          saveLocal(remote); dbRef.current=remote; _setDb(remote); setLastSaved(Date.now());
         }
       });
-    }, 3000); // attendre 3s après le chargement initial
-    return () => { clearTimeout(timer); stopRealtimeSync(); };
-  }, []); // eslint-disable-line
+    }, 2000);
+    return () => { clearTimeout(t); stopSync(); };
+  }, []);
 
-  // ── Sauvegarde automatique avant fermeture de page ──
+  // Sauvegarde avant fermeture
   useEffect(() => {
-    function handleUnload() {
-      const cur = dbRef.current;
-      if (!cur?.superAdmin) return;
-      // saveSync est déjà synchrone — parfait pour beforeunload
-      saveSync(cur);
-      console.log("🔒 Sauvegarde avant fermeture OK");
-    }
-    window.addEventListener("beforeunload", handleUnload);
-    window.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "hidden") handleUnload();
-    });
-    return () => {
-      window.removeEventListener("beforeunload", handleUnload);
-    };
+    const h = () => { const c=dbRef.current; if(c?.superAdmin) saveLocal(c); };
+    window.addEventListener("beforeunload", h);
+    window.addEventListener("visibilitychange", ()=>{ if(document.visibilityState==="hidden") h(); });
+    return () => window.removeEventListener("beforeunload", h);
   }, []);
 
   function logout() { setSession(null); setScreen("login"); }
-
-  const handleImport = (file) => {
-    importJSON(file, async (d) => {
-      await persist(d);
-      alert("✅ Données importées avec succès !");
-      setScreen("login");
-    });
-  };
+  const handleImport = file => importJSON(file, d => { persist(d); alert("✅ Données importées !"); setScreen("login"); });
 
   if (screen==="boot") return <Splash />;
-
-  if (screen==="login") return (
-    <LoginPage db={db}
-      onSuperAdmin={() => setScreen("super-admin")}
-      onMember={(user,copro) => { setSession({user,copro}); setScreen("app"); }}
-      onImport={handleImport}
-    />
-  );
-
+  if (screen==="login") return <LoginPage db={db} onSuperAdmin={()=>setScreen("super-admin")} onMember={(u,c)=>{setSession({user:u,copro:c});setScreen("app");}} onImport={handleImport}/>;
   if (screen==="super-admin") return (
-    <SuperAdmin db={db} persist={persist} persistCopro={persistCopro}
-      onLogout={logout} lastSaved={lastSaved}
-      onExport={() => exportJSON(db)}
-      onImport={handleImport}
-      onEnterCopro={(copro) => {
-        const u = {id:"__admin__",name:db.superAdmin.name+" (Admin)",role:"syndic",type:"proprietaire",active:true};
-        setSession({user:u,copro,isAdmin:true});
-        setScreen("app");
-      }}
-    />
+    <SuperAdmin db={db} persist={persist} lastSaved={lastSaved} onLogout={logout}
+      onExport={()=>exportJSON(db)} onImport={handleImport}
+      onEnterCopro={c=>{setSession({user:{id:"__admin__",name:db.superAdmin.name+" (Admin)",role:"syndic",type:"proprietaire",active:true},copro:c,isAdmin:true});setScreen("app");}}/>
   );
-
   if (screen==="app" && session) {
-    const liveCopro = db?.copros?.find(c=>c.id===session.copro?.id) || session.copro;
-    return (
-      <CoproApp copro={liveCopro} user={session.user}
-        onPersistCopro={persistCopro}
-        onLogout={logout} lastSaved={lastSaved}
-        onBackAdmin={session.isAdmin ? ()=>setScreen("super-admin") : null}
-        onExport={() => exportJSON(db)}
-      />
-    );
+    const liveCopro = db?.copros?.find(c=>c.id===session.copro?.id)||session.copro;
+    return <CoproApp copro={liveCopro} user={session.user} persist={persistCopro} onLogout={logout}
+      lastSaved={lastSaved} onBackAdmin={session.isAdmin?()=>setScreen("super-admin"):null} onExport={()=>exportJSON(db)}/>;
   }
-
   return <Splash />;
 }
 
@@ -457,11 +269,10 @@ function App() {
 // ═══════════════════════════════════════════════════════
 function Splash() {
   return (
-    <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100vh",background:"#07090f"}}>
-      <div style={{textAlign:"center"}}>
-        <div style={{fontSize:44,marginBottom:14}}>🏢</div>
-        <div style={{fontFamily:"Georgia,serif",color:"#3b82f6",fontSize:18}}>Chargement…</div>
-      </div>
+    <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100vh",background:"#07090f",flexDirection:"column",gap:16}}>
+      <div style={{width:44,height:44,borderRadius:"50%",border:"3px solid #1a3a5f",borderTopColor:"#3b82f6",animation:"spin 0.8s linear infinite"}}/>
+      <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+      <div style={{fontFamily:"Georgia,serif",color:"#3b82f6",fontSize:18}}>CoproManager…</div>
     </div>
   );
 }
@@ -470,30 +281,22 @@ function Splash() {
 //  LOGIN
 // ═══════════════════════════════════════════════════════
 function LoginPage({ db, onSuperAdmin, onMember, onImport }) {
-  const [login, setLogin] = useState("");
-  const [pass,  setPass]  = useState("");
-  const [err,   setErr]   = useState("");
-  const [busy,  setBusy]  = useState(false);
-  const fileRef = useRef();
-
+  const [login,setLogin]=useState(""), [pass,setPass]=useState(""), [err,setErr]=useState(""), [busy,setBusy]=useState(false);
+  const fileRef=useRef();
   function attempt() {
     if (!login.trim()||!pass) return;
     setErr(""); setBusy(true);
     setTimeout(() => {
       setBusy(false);
-      const h = hash(pass);
-      if (db?.superAdmin && login.trim().toLowerCase()===db.superAdmin.login && h===db.superAdmin.password) {
-        onSuperAdmin(); return;
-      }
+      const h=hash(pass);
+      if (db?.superAdmin && login.trim().toLowerCase()===db.superAdmin.login && h===db.superAdmin.password) { onSuperAdmin(); return; }
       for (const c of (db?.copros||[])) {
-        const u = (c.users||[]).find(u=>u.login===login.trim().toLowerCase()&&u.password===h&&u.active);
+        const u=(c.users||[]).find(u=>u.login===login.trim().toLowerCase()&&u.password===h&&u.active);
         if (u) { onMember(u,c); return; }
       }
-      setErr("Identifiant ou mot de passe incorrect.");
-      setPass("");
-    }, 400);
+      setErr("Identifiant ou mot de passe incorrect."); setPass("");
+    }, 350);
   }
-
   return (
     <div style={{minHeight:"100vh",background:"#07090f",display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
       <div style={{width:"100%",maxWidth:380}}>
@@ -502,28 +305,16 @@ function LoginPage({ db, onSuperAdmin, onMember, onImport }) {
           <div style={{fontFamily:"Georgia,serif",fontSize:24,fontWeight:700,color:"#f0f9ff"}}>CoproManager</div>
           <div style={{fontFamily:"system-ui",fontSize:13,color:"#475569",marginTop:4}}>Gestion de copropriété</div>
         </div>
-
-        <div style={{background:"#0c1829",borderRadius:18,padding:"30px 26px",border:"1px solid #1a3a5f33",boxShadow:"0 24px 60px rgba(0,0,0,0.5)"}}>
-          <div style={{fontFamily:"system-ui",fontSize:15,fontWeight:700,color:"#e2e8f0",marginBottom:22}}>Connexion</div>
-
-          <FL label="Identifiant (email ou téléphone)">
-            <FI value={login} onChange={setLogin} placeholder="votre identifiant" onKey={e=>e.key==="Enter"&&attempt()} autoFocus />
-          </FL>
-          <FL label="Mot de passe">
-            <FI type="password" value={pass} onChange={setPass} placeholder="••••••••" onKey={e=>e.key==="Enter"&&attempt()} />
-          </FL>
-
-          {err && <Err>{err}</Err>}
-
-          <Btn onClick={attempt} disabled={!login.trim()||!pass||busy} full style={{marginTop:4}}>
-            {busy?"Vérification…":"Se connecter →"}
-          </Btn>
-
+        <div style={S.card}>
+          <FL label="Identifiant"><FI value={login} onChange={setLogin} placeholder="email ou téléphone" onKey={e=>e.key==="Enter"&&attempt()} autoFocus/></FL>
+          <FL label="Mot de passe"><FI type="password" value={pass} onChange={setPass} placeholder="••••••••" onKey={e=>e.key==="Enter"&&attempt()}/></FL>
+          {err&&<Err>{err}</Err>}
+          <Btn onClick={attempt} disabled={!login.trim()||!pass||busy} full>{busy?"Vérification…":"Se connecter →"}</Btn>
           <div style={{marginTop:18,paddingTop:16,borderTop:"1px solid #1a3a5f33",textAlign:"center"}}>
             <button onClick={()=>fileRef.current.click()} style={{background:"none",border:"1px solid #1a3a5f",color:"#64748b",padding:"7px 16px",borderRadius:9,cursor:"pointer",fontFamily:"system-ui",fontSize:12}}>
-              📂 Restaurer une sauvegarde (.json)
+              📂 Restaurer une sauvegarde
             </button>
-            <input ref={fileRef} type="file" accept=".json" style={{display:"none"}} onChange={e=>e.target.files[0]&&onImport(e.target.files[0])} />
+            <input ref={fileRef} type="file" accept=".json" style={{display:"none"}} onChange={e=>e.target.files[0]&&onImport(e.target.files[0])}/>
           </div>
         </div>
       </div>
@@ -534,121 +325,74 @@ function LoginPage({ db, onSuperAdmin, onMember, onImport }) {
 // ═══════════════════════════════════════════════════════
 //  SUPER ADMIN
 // ═══════════════════════════════════════════════════════
-function SuperAdmin({ db, persist, persistCopro, onLogout, onExport, onImport, onEnterCopro, lastSaved }) {
-  const [tab, setTab] = useState("copros");
-  const [selCopro, setSelCopro] = useState(null);
-
-  // Toujours utiliser la copro fraîche depuis db
-  const activeCopro = selCopro ? db.copros.find(c=>c.id===selCopro.id)||selCopro : null;
-
-  const fileRef = useRef();
-
+function SuperAdmin({ db, persist, lastSaved, onLogout, onExport, onImport, onEnterCopro }) {
+  const [tab,setTab]=useState("copros"), [selCopro,setSelCopro]=useState(null);
+  const liveCopro = selCopro ? db.copros.find(c=>c.id===selCopro.id)||selCopro : null;
+  const fileRef=useRef();
   return (
     <div style={S.root}>
       <header style={S.header}>
-        <div>
-          <div style={S.eyebrow}>Super Administrateur</div>
-          <div style={S.title}>CoproManager</div>
-        </div>
+        <div><div style={S.eyebrow}>Super Administrateur</div><div style={S.title}>CoproManager</div></div>
         <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
-          <SaveBadge lastSaved={lastSaved} />
-          <button onClick={onExport} style={{padding:"6px 14px",borderRadius:8,border:"1px solid #166834",background:"#14532d22",color:"#4ade80",fontFamily:"system-ui",fontSize:12,fontWeight:700,cursor:"pointer"}}>
-            💾 Export (.json)
-          </button>
-          <button onClick={()=>fileRef.current.click()} style={{padding:"6px 14px",borderRadius:8,border:"1px solid #1a3a5f",background:"transparent",color:"#64748b",fontFamily:"system-ui",fontSize:12,cursor:"pointer"}}>
-            📂 Restaurer
-          </button>
-          <input ref={fileRef} type="file" accept=".json" style={{display:"none"}} onChange={e=>e.target.files[0]&&onImport(e.target.files[0])} />
+          <SaveBadge lastSaved={lastSaved}/>
+          <button onClick={onExport} style={{padding:"6px 14px",borderRadius:8,border:"1px solid #166834",background:"#14532d22",color:"#4ade80",fontFamily:"system-ui",fontSize:12,fontWeight:700,cursor:"pointer"}}>💾 Export</button>
+          <button onClick={()=>fileRef.current.click()} style={{padding:"6px 14px",borderRadius:8,border:"1px solid #1a3a5f",background:"transparent",color:"#64748b",fontFamily:"system-ui",fontSize:12,cursor:"pointer"}}>📂 Restaurer</button>
+          <input ref={fileRef} type="file" accept=".json" style={{display:"none"}} onChange={e=>e.target.files[0]&&onImport(e.target.files[0])}/>
           <SmBtn onClick={onLogout} danger>Déconnexion</SmBtn>
         </div>
       </header>
-
-      {/* Barre de statut sauvegarde */}
-      <DataStatusBar lastSaved={lastSaved} db={db} onExport={onExport} />
-
+      <DataStatusBar lastSaved={lastSaved} db={db} onExport={onExport}/>
       <div style={S.tabBar}>
         {[{id:"copros",l:"🏢 Copropriétés"},{id:"compte",l:"⚙️ Mon compte"}].map(t=>(
-          <button key={t.id} onClick={()=>{setTab(t.id);if(t.id!=="users")setSelCopro(null);}} style={{...S.tabBtn,...(tab===t.id&&!selCopro?S.tabAct:{})}}>
-            {t.l}
-          </button>
+          <button key={t.id} onClick={()=>{setTab(t.id);setSelCopro(null);}} style={{...S.tabBtn,...(tab===t.id&&!selCopro?S.tabAct:{})}}>{t.l}</button>
         ))}
-        {activeCopro && (
-          <button onClick={()=>setTab("users")} style={{...S.tabBtn,...(tab==="users"?S.tabAct:{}),marginLeft:8,borderLeft:"1px solid #1a3a5f",paddingLeft:16}}>
-            👥 Utilisateurs — {activeCopro.name}
-          </button>
-        )}
+        {liveCopro&&<button onClick={()=>setTab("users")} style={{...S.tabBtn,...(tab==="users"?S.tabAct:{}),marginLeft:8,borderLeft:"1px solid #1a3a5f",paddingLeft:16}}>👥 {liveCopro.name}</button>}
       </div>
-
       <main style={S.main}>
-        {tab==="users" && activeCopro && (
-          <UsersTab copro={activeCopro} db={db} persist={persist}
-            onBack={()=>{setTab("copros");setSelCopro(null);}} />
-        )}
-        {tab==="copros" && (
-          <CoprosTab db={db} persist={persist}
-            onManageUsers={c=>{setSelCopro(c);setTab("users");}}
-            onEnterCopro={onEnterCopro} />
-        )}
-        {tab==="compte" && (
-          <AccountTab db={db} persist={persist} />
-        )}
+        {tab==="copros"&&<CoprosTab db={db} persist={persist} onManageUsers={c=>{setSelCopro(c);setTab("users");}} onEnterCopro={onEnterCopro}/>}
+        {tab==="users"&&liveCopro&&<UsersTab copro={liveCopro} db={db} persist={persist} onBack={()=>{setTab("copros");setSelCopro(null);}}/>}
+        {tab==="compte"&&<AccountTab db={db} persist={persist}/>}
       </main>
     </div>
   );
 }
 
-// ─── Onglet Copropriétés ──────────────────────────────
+// ─── Copropriétés ─────────────────────────────────────────
 function CoprosTab({ db, persist, onManageUsers, onEnterCopro }) {
-  const [showForm, setShowForm] = useState(false);
-  const [edit, setEdit] = useState(null);
-  const [form, setForm] = useState({name:"",address:"",iban:""});
-
+  const [showForm,setShowForm]=useState(false), [edit,setEdit]=useState(null);
+  const [form,setForm]=useState({name:"",address:"",iban:""});
   function openCreate() { setEdit(null); setForm({name:"",address:"",iban:""}); setShowForm(true); }
-  function openEdit(c)  { setEdit(c); setForm({name:c.name,address:c.address||"",iban:c.iban||""}); setShowForm(true); }
-
+  function openEdit(c) { setEdit(c); setForm({name:c.name,address:c.address||"",iban:c.iban||""}); setShowForm(true); }
   async function saveCopro() {
     if (!form.name.trim()) return;
-    const copros = edit
-      ? db.copros.map(c=>c.id===edit.id?{...c,...form}:c)
-      : [...db.copros,{id:uid(),...form,refPriceM3:"",assuranceAnnuelle:"",users:[],appels:[],depenses:[]}];
-    await persist({...db,copros});
-    setShowForm(false);
+    const copros = edit ? db.copros.map(c=>c.id===edit.id?{...c,...form}:c)
+      : [...db.copros,{id:uid(),...form,refPriceM3:"",assuranceAnnuelle:"",adminPin:"",users:[],appels:[],depenses:[]}];
+    await persist({...db,copros}); setShowForm(false);
   }
-
   async function delCopro(id) {
     if (!confirm("Supprimer cette copropriété et toutes ses données ?")) return;
     await persist({...db,copros:db.copros.filter(c=>c.id!==id)});
   }
-
-  const total_users  = db.copros.reduce((s,c)=>s+(c.users||[]).length,0);
-  const total_appels = db.copros.reduce((s,c)=>s+(c.appels||[]).length,0);
-
   return (
     <div>
       <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:12,marginBottom:22}}>
         <KPI icon="🏢" label="Copropriétés" val={db.copros.length} color="#60a5fa"/>
-        <KPI icon="👥" label="Utilisateurs"  val={total_users}      color="#4ade80"/>
-        <KPI icon="📢" label="Appels total"  val={total_appels}     color="#f59e0b"/>
+        <KPI icon="👥" label="Utilisateurs" val={db.copros.reduce((s,c)=>s+(c.users||[]).length,0)} color="#4ade80"/>
+        <KPI icon="📢" label="Appels" val={db.copros.reduce((s,c)=>s+(c.appels||[]).length,0)} color="#f59e0b"/>
       </div>
-
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
         <h2 style={S.h2}>Copropriétés</h2>
-        <Btn small onClick={openCreate}>+ Nouvelle copropriété</Btn>
+        <Btn small onClick={openCreate}>+ Nouvelle</Btn>
       </div>
-
-      {showForm && (
+      {showForm&&(
         <div style={{...S.card,border:"1px solid #2563eb55",marginBottom:20}}>
-          <div style={{fontFamily:"system-ui",fontSize:13,fontWeight:700,color:"#60a5fa",marginBottom:16}}>
-            {edit?"✏️ Modifier":"🏢 Nouvelle copropriété"}
-          </div>
+          <div style={{fontFamily:"system-ui",fontSize:13,fontWeight:700,color:"#60a5fa",marginBottom:16}}>{edit?"✏️ Modifier":"🏢 Nouvelle copropriété"}</div>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
             <FL label="Nom *"><FI value={form.name} onChange={v=>setForm(p=>({...p,name:v}))} placeholder="Résidence Les Mimosas"/></FL>
-            <FL label="Adresse"><FI value={form.address} onChange={v=>setForm(p=>({...p,address:v}))} placeholder="12 rue de la Paix, 13001 Marseille"/></FL>
+            <FL label="Adresse"><FI value={form.address} onChange={v=>setForm(p=>({...p,address:v}))} placeholder="12 rue de la Paix, 13001"/></FL>
           </div>
-          <FL label="IBAN / Coordonnées bancaires (affiché aux membres pour leurs virements)">
-            <textarea value={form.iban} onChange={e=>setForm(p=>({...p,iban:e.target.value}))}
-              placeholder={"FR76 XXXX XXXX XXXX XXXX XXXX XXX\nTitulaire : Jean Dupont"}
-              style={{...S.inp,height:68,resize:"vertical"}}/>
+          <FL label="IBAN (affiché aux membres pour leurs virements)">
+            <textarea value={form.iban} onChange={e=>setForm(p=>({...p,iban:e.target.value}))} placeholder={"FR76 XXXX XXXX XXXX XXXX XXXX XXX\nTitulaire : …"} style={{...S.inp,height:68,resize:"vertical"}}/>
           </FL>
           <div style={{display:"flex",gap:10}}>
             <SecBtn onClick={()=>setShowForm(false)}>Annuler</SecBtn>
@@ -656,14 +400,10 @@ function CoprosTab({ db, persist, onManageUsers, onEnterCopro }) {
           </div>
         </div>
       )}
-
-      {db.copros.length===0&&!showForm && (
-        <Empty>Aucune copropriété.<br/>Créez-en une puis ajoutez ses utilisateurs.</Empty>
-      )}
-
+      {db.copros.length===0&&!showForm&&<Empty>Aucune copropriété. Créez-en une pour commencer.</Empty>}
       {db.copros.map(c=>{
-        const bal = (c.appels||[]).flatMap(a=>(a.payments||[]).filter(p=>p.paid)).reduce((s,p)=>s+Number(p.amount),0)
-                  - (c.depenses||[]).reduce((s,d)=>s+Number(d.amount),0);
+        const bal=(c.appels||[]).flatMap(a=>(a.payments||[]).filter(p=>p.paid)).reduce((s,p)=>s+Number(p.amount),0)-(c.depenses||[]).reduce((s,d)=>s+Number(d.amount),0);
+        const membersNoIndex=(c.users||[]).filter(u=>u.active&&u.id!=="__admin__"&&!u.lastIndex);
         return (
           <div key={c.id} style={{...S.card,marginBottom:14,border:"1px solid #1a3a5f"}}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:12}}>
@@ -673,20 +413,17 @@ function CoprosTab({ db, persist, onManageUsers, onEnterCopro }) {
                   <div style={{fontFamily:"system-ui",fontSize:16,fontWeight:700,color:"#f0f9ff"}}>{c.name}</div>
                   {c.address&&<div style={{fontFamily:"system-ui",fontSize:12,color:"#475569",marginTop:2}}>{c.address}</div>}
                   <div style={{display:"flex",gap:10,marginTop:7,flexWrap:"wrap"}}>
-                    <Tag color="#60a5fa">{(c.users||[]).length} utilisateur{(c.users||[]).length!==1?"s":""}</Tag>
-                    <Tag color={bal>=0?"#4ade80":"#f87171"}>{fEUR(bal)} caisse</Tag>
+                    <Tag color="#60a5fa">{(c.users||[]).length} membre{(c.users||[]).length!==1?"s":""}</Tag>
+                    <Tag color={bal>=0?"#4ade80":"#f87171"}>{fEUR(bal)}</Tag>
                     <Tag color="#f59e0b">{(c.appels||[]).length} appel{(c.appels||[]).length!==1?"s":""}</Tag>
+                    {membersNoIndex.length>0&&<Tag color="#f87171">⚠️ {membersNoIndex.length} index manquant{membersNoIndex.length>1?"s":""}</Tag>}
                   </div>
                 </div>
               </div>
               <div style={{display:"flex",gap:8,flexShrink:0,flexWrap:"wrap",justifyContent:"flex-end"}}>
-                <button onClick={()=>onEnterCopro(c)} style={{padding:"8px 16px",borderRadius:9,border:"none",background:"linear-gradient(135deg,#059669,#10b981)",color:"#fff",fontFamily:"system-ui",fontSize:13,fontWeight:700,cursor:"pointer"}}>
-                  🚀 Accéder
-                </button>
-                <button onClick={()=>onManageUsers(c)} style={{padding:"8px 14px",borderRadius:9,border:"1px solid #2563eb55",background:"#1d4ed822",color:"#60a5fa",fontFamily:"system-ui",fontSize:13,fontWeight:700,cursor:"pointer"}}>
-                  👥 Utilisateurs
-                </button>
-                <IBtn onClick={()=>openEdit(c)} title="Modifier">✏️</IBtn>
+                <button onClick={()=>onEnterCopro(c)} style={{padding:"8px 16px",borderRadius:9,border:"none",background:"linear-gradient(135deg,#059669,#10b981)",color:"#fff",fontFamily:"system-ui",fontSize:13,fontWeight:700,cursor:"pointer"}}>🚀 Accéder</button>
+                <button onClick={()=>onManageUsers(c)} style={{padding:"8px 14px",borderRadius:9,border:"1px solid #2563eb55",background:"#1d4ed822",color:"#60a5fa",fontFamily:"system-ui",fontSize:13,fontWeight:700,cursor:"pointer"}}>👥 Membres</button>
+                <IBtn onClick={()=>openEdit(c)}>✏️</IBtn>
                 <IBtn onClick={()=>delCopro(c.id)} danger>🗑</IBtn>
               </div>
             </div>
@@ -697,103 +434,74 @@ function CoprosTab({ db, persist, onManageUsers, onEnterCopro }) {
   );
 }
 
-// ─── Onglet Utilisateurs ──────────────────────────────
+// ─── Utilisateurs ───────────────────────────────────────
 function UsersTab({ copro, db, persist, onBack }) {
-  const [showForm, setShowForm] = useState(false);
-  const [edit, setEdit]   = useState(null);
-  const [form, setForm]   = useState({name:"",login:"",password:"",role:"membre",type:"proprietaire",active:true});
-  const [err,  setErr]    = useState("");
-  const [search, setSearch] = useState("");
-
+  const [showForm,setShowForm]=useState(false), [edit,setEdit]=useState(null), [err,setErr]=useState(""), [search,setSearch]=useState("");
+  const [form,setForm]=useState({name:"",login:"",password:"",role:"membre",type:"proprietaire",active:true,lastIndex:""});
   function openCreate() { setEdit(null); setForm({name:"",login:"",password:"",role:"membre",type:"proprietaire",active:true,lastIndex:""}); setShowForm(true); setErr(""); }
-  function openEdit(u)  { setEdit(u); setForm({...u,password:"",lastIndex:u.lastIndex||""}); setShowForm(true); setErr(""); }
-
+  function openEdit(u) { setEdit(u); setForm({...u,password:"",lastIndex:u.lastIndex||""}); setShowForm(true); setErr(""); }
   async function saveUser() {
     setErr("");
-    if (!form.name.trim())  { setErr("Nom requis.");         return; }
+    if (!form.name.trim()) { setErr("Nom requis."); return; }
     if (!form.login.trim()) { setErr("Identifiant requis."); return; }
-    const loginLc = form.login.trim().toLowerCase();
-    if (loginLc===db.superAdmin.login) { setErr("Identifiant réservé au super admin."); return; }
-    const allLogins = db.copros.flatMap(c=>(c.users||[]).map(u=>({login:u.login,id:u.id})));
+    const loginLc=form.login.trim().toLowerCase();
+    if (loginLc===db.superAdmin.login) { setErr("Identifiant réservé."); return; }
+    const allLogins=db.copros.flatMap(c=>(c.users||[]).map(u=>({login:u.login,id:u.id})));
     if (allLogins.find(x=>x.login===loginLc&&x.id!==edit?.id)) { setErr("Identifiant déjà utilisé."); return; }
-
     let user;
     if (edit) {
-      user = {...edit,name:form.name.trim(),login:loginLc,role:form.role,type:form.type,active:form.active};
-      if (form.password) user.password = hash(form.password);
-      // Index : seul l'admin peut le modifier — on garde la valeur du form
-      if (form.lastIndex !== undefined && form.lastIndex !== "") {
-        user.lastIndex = Number(form.lastIndex);
-      }
+      user={...edit,name:form.name.trim(),login:loginLc,role:form.role,type:form.type,active:form.active};
+      if (form.password) user.password=hash(form.password);
+      if (form.lastIndex!=="") user.lastIndex=Number(form.lastIndex);
     } else {
       if (!form.password||form.password.length<4) { setErr("Mot de passe min. 4 caractères."); return; }
-      user = {id:uid(),name:form.name.trim(),login:loginLc,password:hash(form.password),role:form.role,type:form.type,active:true};
-      if (form.lastIndex !== undefined && form.lastIndex !== "") {
-        user.lastIndex = Number(form.lastIndex);
-      }
+      user={id:uid(),name:form.name.trim(),login:loginLc,password:hash(form.password),role:form.role,type:form.type,active:true};
+      if (form.lastIndex!=="") user.lastIndex=Number(form.lastIndex);
     }
-
-    const users = edit ? copro.users.map(u=>u.id===edit.id?user:u) : [...(copro.users||[]),user];
+    const users=edit?copro.users.map(u=>u.id===edit.id?user:u):[...(copro.users||[]),user];
     await persist({...db,copros:db.copros.map(c=>c.id===copro.id?{...copro,users}:c)});
     setShowForm(false);
   }
-
   async function toggleActive(u) {
-    const users = (copro.users||[]).map(x=>x.id===u.id?{...x,active:!x.active}:x);
+    const users=(copro.users||[]).map(x=>x.id===u.id?{...x,active:!x.active}:x);
     await persist({...db,copros:db.copros.map(c=>c.id===copro.id?{...copro,users}:c)});
   }
-
   async function delUser(u) {
     if (!confirm(`Supprimer ${u.name} ?`)) return;
-    const users = (copro.users||[]).filter(x=>x.id!==u.id);
+    const users=(copro.users||[]).filter(x=>x.id!==u.id);
     await persist({...db,copros:db.copros.map(c=>c.id===copro.id?{...copro,users}:c)});
   }
-
-  const filtered = (copro.users||[]).filter(u=>
-    u.name.toLowerCase().includes(search.toLowerCase())||
-    u.login.toLowerCase().includes(search.toLowerCase())
-  );
-
+  const filtered=(copro.users||[]).filter(u=>u.name.toLowerCase().includes(search.toLowerCase())||u.login.toLowerCase().includes(search.toLowerCase()));
   return (
     <div>
       <div style={{display:"flex",alignItems:"center",gap:14,marginBottom:22}}>
         <button onClick={onBack} style={{padding:"7px 14px",borderRadius:9,border:"1px solid #1a3a5f",background:"transparent",color:"#64748b",fontFamily:"system-ui",fontSize:13,cursor:"pointer"}}>← Retour</button>
-        <div>
-          <h2 style={{...S.h2,marginBottom:2}}>👥 Utilisateurs</h2>
-          <div style={{fontFamily:"system-ui",fontSize:12,color:"#475569"}}>🏢 {copro.name}</div>
-        </div>
+        <div><h2 style={{...S.h2,marginBottom:2}}>👥 Membres</h2><div style={{fontFamily:"system-ui",fontSize:12,color:"#475569"}}>🏢 {copro.name}</div></div>
       </div>
-
       <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10,marginBottom:18}}>
-        <KPI icon="👤" label="Total"         val={(copro.users||[]).length}                               color="#60a5fa"/>
-        <KPI icon="✅" label="Actifs"         val={(copro.users||[]).filter(u=>u.active).length}           color="#4ade80"/>
+        <KPI icon="👤" label="Total" val={(copro.users||[]).length} color="#60a5fa"/>
+        <KPI icon="✅" label="Actifs" val={(copro.users||[]).filter(u=>u.active).length} color="#4ade80"/>
         <KPI icon="🏠" label="Propriétaires" val={(copro.users||[]).filter(u=>u.type==="proprietaire").length} color="#f59e0b"/>
-        <KPI icon="🔑" label="Locataires"    val={(copro.users||[]).filter(u=>u.type==="locataire").length} color="#a78bfa"/>
+        <KPI icon="🔢" label="Index définis" val={(copro.users||[]).filter(u=>u.lastIndex).length} color="#a78bfa"/>
       </div>
-
       <div style={{display:"flex",gap:10,marginBottom:16}}>
         <div style={{position:"relative",flex:1}}>
           <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Rechercher…" style={{...S.inp,paddingLeft:36}}/>
           <span style={{position:"absolute",left:12,top:"50%",transform:"translateY(-50%)",color:"#475569"}}>🔍</span>
         </div>
-        <Btn small onClick={openCreate}>+ Nouvel utilisateur</Btn>
+        <Btn small onClick={openCreate}>+ Ajouter</Btn>
       </div>
-
-      {showForm && (
+      {showForm&&(
         <div style={{...S.card,border:"1px solid #2563eb55",marginBottom:18}}>
-          <div style={{fontFamily:"system-ui",fontSize:13,fontWeight:700,color:"#60a5fa",marginBottom:16}}>
-            {edit?`✏️ Modifier — ${edit.name}`:"➕ Nouvel utilisateur"}
-          </div>
+          <div style={{fontFamily:"system-ui",fontSize:13,fontWeight:700,color:"#60a5fa",marginBottom:16}}>{edit?`✏️ ${edit.name}`:"➕ Nouvel utilisateur"}</div>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
             <FL label="Nom complet *"><FI value={form.name} onChange={v=>setForm(p=>({...p,name:v}))} placeholder="Prénom Nom"/></FL>
-            <FL label="Identifiant (email ou téléphone) *"><FI value={form.login} onChange={v=>setForm(p=>({...p,login:v}))} placeholder="email ou 06XXXXXXXX"/></FL>
-            <FL label={edit?"Nouveau mot de passe (vide = inchangé)":"Mot de passe *"}>
-              <FI type="password" value={form.password} onChange={v=>setForm(p=>({...p,password:v}))} placeholder={edit?"(inchangé)":"Min. 4 caractères"}/>
-            </FL>
+            <FL label="Identifiant *"><FI value={form.login} onChange={v=>setForm(p=>({...p,login:v}))} placeholder="email ou 06XXXXXXXX"/></FL>
+            <FL label={edit?"Nouveau mot de passe":"Mot de passe *"}><FI type="password" value={form.password} onChange={v=>setForm(p=>({...p,password:v}))} placeholder={edit?"(inchangé)":"Min. 4 caractères"}/></FL>
             <FL label="Rôle">
               <select value={form.role} onChange={e=>setForm(p=>({...p,role:e.target.value}))} style={S.inp}>
-                <option value="syndic">Syndic — gère appels et caisse</option>
-                <option value="membre">Membre — saisit ses relevés</option>
+                <option value="syndic">Syndic</option>
+                <option value="membre">Membre</option>
               </select>
             </FL>
             <FL label="Type">
@@ -802,75 +510,54 @@ function UsersTab({ copro, db, persist, onBack }) {
                 <option value="locataire">🔑 Locataire</option>
               </select>
             </FL>
-            {edit && (
-              <FL label="Statut">
-                <select value={form.active?"1":"0"} onChange={e=>setForm(p=>({...p,active:e.target.value==="1"}))} style={S.inp}>
-                  <option value="1">✅ Actif</option>
-                  <option value="0">🚫 Inactif</option>
-                </select>
-              </FL>
-            )}
+            {edit&&<FL label="Statut">
+              <select value={form.active?"1":"0"} onChange={e=>setForm(p=>({...p,active:e.target.value==="1"}))} style={S.inp}>
+                <option value="1">✅ Actif</option>
+                <option value="0">🚫 Inactif</option>
+              </select>
+            </FL>}
           </div>
-          {/* Index compteur — admin protégé */}
-          <div style={{background:"#07090f",borderRadius:10,padding:"14px",border:"1px solid #f59e0b44",marginTop:8,marginBottom:8}}>
-            <div style={{fontFamily:"system-ui",fontSize:12,fontWeight:700,color:"#f59e0b",marginBottom:10}}>
-              🔒 Index compteur eau (admin uniquement)
-            </div>
-            <FL label="Index de base — relevé initial ou actuel (m³)">
+          <div style={{background:"#07090f",borderRadius:10,padding:"14px",border:"1px solid #f59e0b44",marginTop:4,marginBottom:8}}>
+            <div style={{fontFamily:"system-ui",fontSize:12,fontWeight:700,color:"#f59e0b",marginBottom:10}}>🔒 Index compteur (admin uniquement)</div>
+            <FL label="Index actuel du compteur (m³)">
               <div style={{position:"relative"}}>
-                <input type="number" min="0" step="0.001"
-                  value={form.lastIndex ?? ""}
-                  onChange={e=>setForm(p=>({...p,lastIndex:e.target.value}))}
-                  placeholder="ex: 1535.250"
-                  style={{...S.inp,paddingRight:42}}/>
+                <input type="number" min="0" step="0.001" value={form.lastIndex??""} onChange={e=>setForm(p=>({...p,lastIndex:e.target.value}))} placeholder="ex: 1535.250" style={{...S.inp,paddingRight:42}}/>
                 <span style={{position:"absolute",right:12,top:"50%",transform:"translateY(-50%)",color:"#38bdf8",fontFamily:"system-ui",fontSize:12,fontWeight:700}}>m³</span>
               </div>
             </FL>
-            {edit?.lastIndex && (
-              <div style={{fontFamily:"system-ui",fontSize:12,color:"#38bdf8",marginTop:4}}>
-                Index enregistré actuellement : <strong>{Number(edit.lastIndex).toFixed(3)} m³</strong>
-              </div>
-            )}
-            <div style={{fontFamily:"system-ui",fontSize:11,color:"#475569",marginTop:8,lineHeight:1.5}}>
-              ⚠️ Seul l'administrateur peut modifier cet index. Le propriétaire ne peut que le consulter.
-              Il sert de base pour calculer la consommation lors du prochain relevé.
-            </div>
+            {edit?.lastIndex&&<div style={{fontFamily:"system-ui",fontSize:12,color:"#38bdf8",marginTop:4}}>Index actuel : <strong>{Number(edit.lastIndex).toFixed(3)} m³</strong></div>}
+            <div style={{fontFamily:"system-ui",fontSize:11,color:"#475569",marginTop:6,lineHeight:1.5}}>⚠️ Seul l'administrateur peut modifier cet index. Il sert de base pour le calcul de consommation.</div>
           </div>
-
-          {err && <Err>{err}</Err>}
+          {err&&<Err>{err}</Err>}
           <div style={{display:"flex",gap:10,marginTop:6}}>
             <SecBtn onClick={()=>setShowForm(false)}>Annuler</SecBtn>
-            <Btn onClick={saveUser}>{edit?"Enregistrer les modifications":"Créer l'utilisateur"}</Btn>
+            <Btn onClick={saveUser}>{edit?"Enregistrer":"Créer"}</Btn>
           </div>
         </div>
       )}
-
-      {filtered.length===0&&!showForm && (
-        <Empty>Aucun utilisateur.<br/>Cliquez sur <strong>+ Nouvel utilisateur</strong> pour commencer.</Empty>
-      )}
-
-      {filtered.length>0 && (
+      {filtered.length===0&&!showForm&&<Empty>Aucun utilisateur. Cliquez sur <strong>+ Ajouter</strong>.</Empty>}
+      {filtered.length>0&&(
         <div style={{border:"1px solid #1a3a5f33",borderRadius:12,overflow:"hidden"}}>
-          <div style={{display:"grid",gridTemplateColumns:"2fr 2fr 1fr 1fr 90px",gap:0,background:"#060c16",padding:"10px 16px",borderBottom:"1px solid #1a3a5f22"}}>
-            {["Nom","Identifiant","Rôle","Statut","Actions"].map(h=>(
-              <div key={h} style={{fontFamily:"system-ui",fontSize:11,fontWeight:700,color:"#334155",letterSpacing:1,textTransform:"uppercase"}}>{h}</div>
-            ))}
+          <div style={{display:"grid",gridTemplateColumns:"2fr 1.5fr 1fr 1fr 1fr",background:"#060c16",padding:"10px 16px",borderBottom:"1px solid #1a3a5f22"}}>
+            {["Nom","Login","Rôle","Index","Actions"].map(h=><div key={h} style={{fontFamily:"system-ui",fontSize:11,fontWeight:700,color:"#334155",letterSpacing:1,textTransform:"uppercase"}}>{h}</div>)}
           </div>
           {filtered.map((u,i)=>(
-            <div key={u.id} style={{display:"grid",gridTemplateColumns:"2fr 2fr 1fr 1fr 90px",gap:0,padding:"12px 16px",borderBottom:i<filtered.length-1?"1px solid #1a3a5f11":"none",background:i%2===0?"#0c1829":"#090f1d",alignItems:"center"}}>
+            <div key={u.id} style={{display:"grid",gridTemplateColumns:"2fr 1.5fr 1fr 1fr 1fr",padding:"12px 16px",borderBottom:i<filtered.length-1?"1px solid #1a3a5f11":"none",background:i%2===0?"#0c1829":"#090f1d",alignItems:"center"}}>
               <div style={{display:"flex",alignItems:"center",gap:10}}>
                 <Av name={u.name} idx={i} size={32}/>
                 <div>
                   <div style={{fontFamily:"system-ui",fontSize:13,fontWeight:600,color:"#e2e8f0"}}>{u.name}</div>
-                  <div style={{fontFamily:"system-ui",fontSize:11,color:"#475569"}}>{u.type==="proprietaire"?"🏠":"🔑"} {u.type}</div>
+                  <div style={{fontFamily:"system-ui",fontSize:11,color:"#475569"}}>{u.type==="proprietaire"?"🏠":"🔑"} {u.active?"Actif":"Inactif"}</div>
                 </div>
               </div>
               <div style={{fontFamily:"system-ui",fontSize:12,color:"#64748b"}}>{u.login}</div>
               <div><Tag color={u.role==="syndic"?"#60a5fa":"#a3e635"}>{u.role}</Tag></div>
-              <div><span style={{fontFamily:"system-ui",fontSize:11,padding:"3px 9px",borderRadius:20,background:u.active?"#14532d":"#450a0a",color:u.active?"#4ade80":"#f87171"}}>{u.active?"Actif":"Inactif"}</span></div>
+              <div style={{fontFamily:"system-ui",fontSize:12,color:u.lastIndex?"#38bdf8":"#f59e0b"}}>
+                {u.lastIndex?fM3(u.lastIndex)+" m³":"⚠️ Non défini"}
+              </div>
               <div style={{display:"flex",gap:4}}>
-                <IBtn onClick={()=>openEdit(u)} title="Modifier">✏️</IBtn>
-                <IBtn onClick={()=>toggleActive(u)} title={u.active?"Désactiver":"Activer"}>{u.active?"🚫":"✅"}</IBtn>
+                <IBtn onClick={()=>openEdit(u)}>✏️</IBtn>
+                <IBtn onClick={()=>toggleActive(u)}>{u.active?"🚫":"✅"}</IBtn>
                 <IBtn onClick={()=>delUser(u)} danger>🗑</IBtn>
               </div>
             </div>
@@ -881,32 +568,26 @@ function UsersTab({ copro, db, persist, onBack }) {
   );
 }
 
-// ─── Compte super admin ───────────────────────────────
+// ─── Compte admin ───────────────────────────────────────
 function AccountTab({ db, persist }) {
-  const [name, setName] = useState(db.superAdmin.name);
-  const [login,setLogin]= useState(db.superAdmin.login);
-  const [pass, setPass] = useState("");
-  const [conf, setConf] = useState("");
-  const [err,  setErr]  = useState("");
-  const [ok,   setOk]   = useState(false);
-
+  const [name,setName]=useState(db.superAdmin.name), [login,setLogin]=useState(db.superAdmin.login);
+  const [pass,setPass]=useState(""), [conf,setConf]=useState(""), [err,setErr]=useState(""), [ok,setOk]=useState(false);
   async function save() {
     setErr("");
     if (!login.trim()) { setErr("Identifiant requis."); return; }
     if (pass&&pass.length<4) { setErr("Mot de passe trop court."); return; }
     if (pass&&pass!==conf) { setErr("Mots de passe différents."); return; }
-    const sa = {...db.superAdmin,name:name.trim(),login:login.trim().toLowerCase()};
+    const sa={...db.superAdmin,name:name.trim(),login:login.trim().toLowerCase()};
     if (pass) sa.password=hash(pass);
     await persist({...db,superAdmin:sa});
     setOk(true); setPass(""); setConf(""); setTimeout(()=>setOk(false),2000);
   }
-
   return (
     <div style={{maxWidth:480}}>
       <h2 style={S.h2}>Mon compte</h2>
       <div style={S.card}>
         <FL label="Nom"><FI value={name} onChange={setName}/></FL>
-        <FL label="Identifiant de connexion"><FI value={login} onChange={setLogin}/></FL>
+        <FL label="Identifiant"><FI value={login} onChange={setLogin}/></FL>
         <FL label="Nouveau mot de passe"><FI type="password" value={pass} onChange={setPass} placeholder="(inchangé)"/></FL>
         <FL label="Confirmer"><FI type="password" value={conf} onChange={setConf}/></FL>
         {err&&<Err>{err}</Err>}
@@ -919,278 +600,79 @@ function AccountTab({ db, persist }) {
 // ═══════════════════════════════════════════════════════
 //  COPRO APP (syndic + membres)
 // ═══════════════════════════════════════════════════════
-function CoproApp({ copro, user, onPersistCopro, onLogout, onBackAdmin, onExport, lastSaved }) {
-  const [tab, setTab] = useState("dashboard");
-  const isSyndic = user.role==="syndic";
-  const members  = (copro.users||[]).filter(u=>u.active&&u.id!=="__admin__");
-
-  async function updateCopro(patch) {
-    await onPersistCopro({...copro,...patch});
-  }
-
-  const balance = (()=>{
-    const IN  = (copro.appels||[]).flatMap(a=>(a.payments||[]).filter(p=>p.paid)).reduce((s,p)=>s+Number(p.amount),0);
-    const OUT = (copro.depenses||[]).reduce((s,d)=>s+Number(d.amount),0);
+function CoproApp({ copro, user, persist, onLogout, lastSaved, onBackAdmin, onExport }) {
+  const [tab,setTab]=useState("dashboard");
+  const isSyndic=user.role==="syndic";
+  const members=(copro.users||[]).filter(u=>u.active&&u.id!=="__admin__");
+  const balance=(()=>{
+    const IN=(copro.appels||[]).flatMap(a=>(a.payments||[]).filter(p=>p.paid)).reduce((s,p)=>s+Number(p.amount),0);
+    const OUT=(copro.depenses||[]).reduce((s,d)=>s+Number(d.amount),0);
     return IN-OUT;
   })();
-
-  const TABS = [
-    {id:"dashboard",  label:"🏠 Accueil",       show:true},
-    {id:"appels",     label:"📢 Appels",         show:isSyndic},
-    {id:"releve",     label:"💧 Mon relevé",     show:!isSyndic},
-    {id:"compteurs",  label:"🔢 Compteurs",      show:isSyndic},
-    {id:"caisse",     label:"🏦 Caisse",         show:isSyndic},
-    {id:"depenses",   label:"💸 Dépenses",       show:isSyndic},
-    {id:"params",     label:"⚙️ Paramètres",     show:isSyndic},
+  async function update(patch) { await persist({...copro,...patch}); }
+  const TABS=[
+    {id:"dashboard",label:"🏠 Accueil",   show:true},
+    {id:"appels",   label:"📢 Appels",     show:isSyndic},
+    {id:"compteurs",label:"🔢 Compteurs",  show:isSyndic},
+    {id:"caisse",   label:"🏦 Caisse",     show:isSyndic},
+    {id:"depenses", label:"💸 Dépenses",   show:isSyndic},
+    {id:"params",   label:"⚙️ Paramètres", show:isSyndic},
   ].filter(t=>t.show);
-
   return (
     <div style={S.root}>
       <header style={S.header}>
-        <div>
-          <div style={S.eyebrow}>{copro.name}</div>
-          <div style={S.title}>{user.name}</div>
-        </div>
+        <div><div style={S.eyebrow}>{copro.name}</div><div style={S.title}>{user.name}</div></div>
         <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
-          {onBackAdmin && (
-            <button onClick={onBackAdmin} style={{padding:"6px 14px",borderRadius:8,border:"1px solid #f59e0b55",background:"#f59e0b18",color:"#f59e0b",fontFamily:"system-ui",fontSize:12,fontWeight:700,cursor:"pointer"}}>← Admin</button>
-          )}
-          <SaveBadge lastSaved={lastSaved} />
-          {isSyndic && (
-            <button onClick={onExport} style={{padding:"6px 14px",borderRadius:8,border:"1px solid #166834",background:"#14532d22",color:"#4ade80",fontFamily:"system-ui",fontSize:12,fontWeight:700,cursor:"pointer"}}>💾 Export</button>
-          )}
+          {onBackAdmin&&<button onClick={onBackAdmin} style={{padding:"6px 14px",borderRadius:8,border:"1px solid #f59e0b55",background:"#f59e0b18",color:"#f59e0b",fontFamily:"system-ui",fontSize:12,fontWeight:700,cursor:"pointer"}}>← Admin</button>}
+          <SaveBadge lastSaved={lastSaved}/>
+          {isSyndic&&<button onClick={onExport} style={{padding:"6px 14px",borderRadius:8,border:"1px solid #166834",background:"#14532d22",color:"#4ade80",fontFamily:"system-ui",fontSize:12,fontWeight:700,cursor:"pointer"}}>💾 Export</button>}
           <Tag color={isSyndic?"#60a5fa":"#a3e635"}>{isSyndic?"Syndic":"Membre"}</Tag>
           {isSyndic&&<span style={{fontFamily:"system-ui",fontSize:12,color:"#4ade80",fontWeight:700}}>{fEUR(balance)}</span>}
           {!onBackAdmin&&<SmBtn onClick={onLogout} danger>Déconnexion</SmBtn>}
         </div>
       </header>
-
       <div style={S.tabBar}>
-        {TABS.map(t=>(
-          <button key={t.id} onClick={()=>setTab(t.id)} style={{...S.tabBtn,...(tab===t.id?S.tabAct:{})}}>{t.label}</button>
-        ))}
+        {TABS.map(t=><button key={t.id} onClick={()=>setTab(t.id)} style={{...S.tabBtn,...(tab===t.id?S.tabAct:{})}}>{t.label}</button>)}
       </div>
-
       <main style={S.main}>
-        {tab==="dashboard" && <Dashboard copro={copro} user={user} isSyndic={isSyndic} balance={balance} members={members} updateCopro={updateCopro}/>}
-        {tab==="appels"    && isSyndic && <AppelsTab copro={copro} members={members} update={updateCopro}/>}
-        {tab==="releve"    && !isSyndic && <ReleveTab copro={copro} user={user} update={updateCopro}/>}
-        {tab==="caisse"    && isSyndic && <CaisseTab copro={copro} balance={balance} update={updateCopro}/>}
-        {tab==="depenses"  && isSyndic && <DepensesTab copro={copro} update={updateCopro}/>}
-        {tab==="compteurs" && isSyndic && <CompteursTab copro={copro} update={updateCopro}/>}
-        {tab==="params"    && isSyndic && <ParamsTab copro={copro} update={updateCopro}/>}
+        {tab==="dashboard"&&<Dashboard copro={copro} user={user} isSyndic={isSyndic} balance={balance} members={members} update={update}/>}
+        {tab==="appels"&&isSyndic&&<AppelsTab copro={copro} members={members} update={update}/>}
+        {tab==="compteurs"&&isSyndic&&<CompteursTab copro={copro} update={update}/>}
+        {tab==="caisse"&&isSyndic&&<CaisseTab copro={copro} balance={balance} update={update}/>}
+        {tab==="depenses"&&isSyndic&&<DepensesTab copro={copro} update={update}/>}
+        {tab==="params"&&isSyndic&&<ParamsTab copro={copro} update={update}/>}
       </main>
     </div>
   );
 }
 
-// ─── Saisie de l'index compteur (depuis le dashboard) ────
-function InlineReleveForm({ appels, user, copro, update }) {
-  const [vals, setVals] = useState({});
-
-  // Récupère l'index précédent de l'utilisateur
-  function getLastIndex(userId) {
-    const user = (copro.users||[]).find(u=>u.id===userId);
-    return user?.lastIndex || null;
-  }
-
-  async function submit(appelId, currentIndex) {
-    const idx = Number(currentIndex);
-    if (!idx || idx <= 0) return;
-    const lastIdx = getLastIndex(user.id);
-    const conso = lastIdx ? Math.max(0, idx - lastIdx) : idx;
-
-    const newAppels = (copro.appels||[]).map(a => {
-      if (a.id !== appelId) return a;
-      const releves = [...(a.releves||[]).filter(r=>r.ownerId!==user.id), {
-        ownerId: user.id,
-        ownerName: user.name,
-        currentIndex: idx,
-        lastIndex: lastIdx,
-        m3: conso,
-        enteredAt: new Date().toISOString()
-      }];
-      return { ...a, releves };
-    });
-
-    // Mettre à jour l'index dans le profil utilisateur
-    const newUsers = (copro.users||[]).map(u =>
-      u.id === user.id ? { ...u, lastIndex: idx } : u
-    );
-
-    await update({ appels: newAppels, users: newUsers });
-    setVals(p => ({ ...p, [appelId]: "" }));
-  }
-
-  return (
-    <Sec title="💧 Facture eau — Saisissez votre index">
-      {appels.map(a => {
-        const r = (a.releves||[]).find(rv => rv.ownerId === user.id);
-        const lastIdx = getLastIndex(user.id);
-        const currentVal = vals[a.id] || "";
-        const previewConso = currentVal && lastIdx ? Math.max(0, Number(currentVal) - lastIdx) : currentVal ? Number(currentVal) : null;
-        const pm3 = a.priceM3 || (copro.refPriceM3 ? Number(copro.refPriceM3) : null);
-        const previewEur = previewConso && pm3 ? previewConso * pm3 : null;
-
-        return (
-          <div key={a.id} style={{ ...S.card, border:`1px solid ${r?"#166834":"#f59e0b55"}` }}>
-            {/* En-tête */}
-            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:16 }}>
-              <div>
-                <div style={{ fontFamily:"system-ui", fontSize:15, fontWeight:700, color:"#f0f9ff" }}>💧 {a.title}</div>
-                <div style={{ fontFamily:"system-ui", fontSize:12, color:"#64748b", marginTop:3 }}>
-                  {fDATE(a.date)}
-                  {a.totalBill && <span style={{color:"#f59e0b",marginLeft:8}}>Facture totale : {fEUR(a.totalBill)}</span>}
-                </div>
-              </div>
-              <span style={{ fontFamily:"system-ui",fontSize:11,padding:"3px 10px",borderRadius:20,
-                background:r?"#14532d":"#f59e0b22",color:r?"#4ade80":"#f59e0b"}}>
-                {r?"✓ Index saisi":"⏳ À saisir"}
-              </span>
-            </div>
-
-            {r ? (
-              /* Index déjà saisi */
-              <div style={{ background:"#14532d22",borderRadius:10,padding:"16px",border:"1px solid #166834" }}>
-                <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:12, marginBottom:12 }}>
-                  <div style={{ textAlign:"center" }}>
-                    <div style={{ fontFamily:"system-ui",fontSize:10,color:"#64748b",textTransform:"uppercase",letterSpacing:1,marginBottom:4 }}>Index précédent</div>
-                    <div style={{ fontFamily:"system-ui",fontSize:16,fontWeight:700,color:"#94a3b8" }}>
-                      {r.lastIndex ? fM3(r.lastIndex) : "—"} <span style={{fontSize:11}}>m³</span>
-                    </div>
-                  </div>
-                  <div style={{ textAlign:"center" }}>
-                    <div style={{ fontFamily:"system-ui",fontSize:10,color:"#64748b",textTransform:"uppercase",letterSpacing:1,marginBottom:4 }}>Index actuel</div>
-                    <div style={{ fontFamily:"system-ui",fontSize:16,fontWeight:700,color:"#38bdf8" }}>
-                      {fM3(r.currentIndex)} <span style={{fontSize:11}}>m³</span>
-                    </div>
-                  </div>
-                  <div style={{ textAlign:"center" }}>
-                    <div style={{ fontFamily:"system-ui",fontSize:10,color:"#64748b",textTransform:"uppercase",letterSpacing:1,marginBottom:4 }}>Consommation</div>
-                    <div style={{ fontFamily:"system-ui",fontSize:16,fontWeight:700,color:"#4ade80" }}>
-                      {fM3(r.m3)} <span style={{fontSize:11}}>m³</span>
-                    </div>
-                  </div>
-                </div>
-                {pm3 && (
-                  <div style={{ background:"#060c16",borderRadius:8,padding:"10px 12px",fontFamily:"system-ui",fontSize:13,textAlign:"center" }}>
-                    <span style={{color:"#64748b"}}>{fM3(r.m3)} m³ × {pm3.toFixed(4)} €/m³ = </span>
-                    <strong style={{color:"#f59e0b",fontSize:16}}>{fEUR(r.m3 * pm3)}</strong>
-                    <div style={{color:"#475569",fontSize:11,marginTop:2}}>estimation — le montant exact sera calculé après que tous aient saisi</div>
-                  </div>
-                )}
-                <div style={{textAlign:"right",marginTop:10}}>
-                  <button onClick={()=>update({appels:(copro.appels||[]).map(x=>x.id!==a.id?x:{...x,releves:(x.releves||[]).filter(rv=>rv.ownerId!==user.id)})})}
-                    style={{background:"none",border:"1px solid #1a3a5f",color:"#64748b",padding:"5px 14px",borderRadius:8,cursor:"pointer",fontFamily:"system-ui",fontSize:12}}>
-                    ✏️ Modifier
-                  </button>
-                </div>
-              </div>
-            ) : (
-              /* Saisie de l'index */
-              <div>
-                {lastIdx && (
-                  <div style={{ background:"#0a1628",borderRadius:8,padding:"10px 12px",marginBottom:12,fontFamily:"system-ui",fontSize:12,display:"flex",justifyContent:"space-between" }}>
-                    <span style={{color:"#64748b"}}>Votre dernier index enregistré :</span>
-                    <strong style={{color:"#38bdf8"}}>{fM3(lastIdx)} m³</strong>
-                  </div>
-                )}
-
-                <FL label="Votre index actuel (relevé sur votre compteur)">
-                  <div style={{display:"flex",gap:10}}>
-                    <div style={{position:"relative",flex:1}}>
-                      <input type="number" min="0" step="0.001"
-                        value={currentVal}
-                        onChange={e=>setVals(p=>({...p,[a.id]:e.target.value}))}
-                        onKeyDown={e=>e.key==="Enter"&&submit(a.id,currentVal)}
-                        placeholder={lastIdx ? `> ${fM3(lastIdx)}` : "ex: 1547.250"}
-                        autoFocus
-                        style={{...S.inp, paddingRight:42, fontSize:16, fontWeight:600}}/>
-                      <span style={{position:"absolute",right:12,top:"50%",transform:"translateY(-50%)",color:"#38bdf8",fontFamily:"system-ui",fontSize:13,fontWeight:700}}>m³</span>
-                    </div>
-                    <button onClick={()=>submit(a.id,currentVal)}
-                      disabled={!currentVal||Number(currentVal)<=0||(lastIdx&&Number(currentVal)<=lastIdx)}
-                      style={{padding:"0 22px",borderRadius:10,border:"none",
-                        background:(!currentVal||Number(currentVal)<=0)?"#1e3a5f":"linear-gradient(135deg,#059669,#10b981)",
-                        color:(!currentVal||Number(currentVal)<=0)?"#475569":"#fff",
-                        fontFamily:"system-ui",fontSize:14,fontWeight:700,
-                        cursor:(!currentVal||Number(currentVal)<=0)?"not-allowed":"pointer",whiteSpace:"nowrap"}}>
-                      ✓ Valider
-                    </button>
-                  </div>
-                </FL>
-
-                {/* Preview en temps réel */}
-                {previewConso !== null && previewConso >= 0 && (
-                  <div style={{background:"#0a1628",borderRadius:10,padding:"12px",border:"1px solid #1a3a5f44",marginTop:4}}>
-                    <div style={{display:"flex",justifyContent:"space-between",fontFamily:"system-ui",fontSize:13,marginBottom:6}}>
-                      <span style={{color:"#64748b"}}>Consommation calculée :</span>
-                      <strong style={{color:"#38bdf8"}}>{fM3(previewConso)} m³</strong>
-                    </div>
-                    {lastIdx && <div style={{fontFamily:"system-ui",fontSize:11,color:"#475569",marginBottom:8}}>
-                      {Number(currentVal).toFixed(3)} − {fM3(lastIdx)} = {fM3(previewConso)} m³
-                    </div>}
-                    {previewEur !== null && (
-                      <div style={{display:"flex",justifyContent:"space-between",fontFamily:"system-ui",fontSize:14,fontWeight:700}}>
-                        <span style={{color:"#64748b"}}>Votre part estimée :</span>
-                        <span style={{color:"#f59e0b"}}>{fEUR(previewEur)}</span>
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {lastIdx && currentVal && Number(currentVal) <= lastIdx && Number(currentVal) > 0 && (
-                  <div style={{fontFamily:"system-ui",fontSize:12,color:"#f87171",marginTop:6}}>
-                    ⚠️ L'index actuel doit être supérieur à l'index précédent ({fM3(lastIdx)} m³)
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        );
-      })}
-    </Sec>
-  );
-}
-
-// ─── Dashboard ────────────────────────────────────────
-function Dashboard({ copro, user, isSyndic, balance, members, updateCopro }) {
-  const myPending = (copro.appels||[])
-    .filter(a => a.status !== "open") // exclure eau en attente de relevés (montant pas encore calculé)
-    .flatMap(a =>
-      (a.payments||[])
-        .filter(p => p.owner===user.id && !p.paid && Number(p.amount) > 0)
-        .map(p => ({
-          ...p,
-          appelTitle: a.title,
-          appelDate:  a.date,
-          appelType:  a.type,
-          totalBill:  a.totalBill,
-          priceM3:    a.priceM3 || null,
-          totalConso: a.totalConso || null,
-        }))
-    );
-  const openReleves = (copro.appels||[]).filter(a=>a.type==="eau"&&a.status==="open");
-
+// ─── Dashboard ────────────────────────────────────────────
+function Dashboard({ copro, user, isSyndic, balance, members, update }) {
+  const openEau=(copro.appels||[]).filter(a=>a.type==="eau"&&a.status==="open");
+  const myUser=(copro.users||[]).find(u=>u.id===user.id);
+  const myPending=(copro.appels||[]).filter(a=>a.status==="active"||a.status==="complete")
+    .flatMap(a=>(a.payments||[]).filter(p=>p.owner===user.id&&!p.paid&&Number(p.amount)>0)
+    .map(p=>({...p,appelTitle:a.title,appelDate:a.date,appelType:a.type,totalBill:a.totalBill,priceM3:a.priceM3,totalConso:a.totalConso})));
   return (
     <div>
       <div style={{...S.card,background:"linear-gradient(135deg,#0d1e38,#0a1628)",border:"1px solid #1d4ed833",marginBottom:20}}>
         <div style={{fontFamily:"system-ui",fontSize:13,color:"#475569",marginBottom:4}}>Bienvenue,</div>
         <div style={{fontFamily:"Georgia,serif",fontSize:22,fontWeight:700,color:"#f0f9ff",marginBottom:isSyndic?16:0}}>{user.name}</div>
-        {isSyndic && (
-          <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10}}>
-            <MK label="Solde"         val={fEUR(balance)}    color={balance>=0?"#4ade80":"#f87171"}/>
-            <MK label="Appels actifs" val={(copro.appels||[]).filter(a=>a.status!=="complete").length} color="#60a5fa"/>
-            <MK label="Membres"       val={members.length}   color="#a78bfa"/>
-          </div>
-        )}
+        {isSyndic&&<div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10}}>
+          <MK label="Solde" val={fEUR(balance)} color={balance>=0?"#4ade80":"#f87171"}/>
+          <MK label="Appels actifs" val={(copro.appels||[]).filter(a=>a.status!=="complete").length} color="#60a5fa"/>
+          <MK label="Membres" val={members.length} color="#a78bfa"/>
+        </div>}
       </div>
 
-      {myPending.length>0 && (
-        <Sec title={`⚠️ À payer (${myPending.length})`}>
+      {/* Relevé eau inline pour membres */}
+      {!isSyndic&&openEau.length>0&&<InlineReleveForm appels={openEau} user={user} copro={copro} update={update}/>}
+
+      {/* À payer */}
+      {!isSyndic&&myPending.length>0&&(
+        <Sec title={`⚠️ À rembourser (${myPending.length})`}>
           {myPending.map((p,i)=>(
             <div key={i} style={{...S.card,border:"1px solid #f59e0b44",marginBottom:10}}>
-              {/* En-tête : titre + montant */}
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:14}}>
                 <div>
                   <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
@@ -1204,77 +686,26 @@ function Dashboard({ copro, user, isSyndic, balance, members, updateCopro }) {
                   <div style={{fontFamily:"system-ui",fontSize:11,color:"#64748b"}}>à virer</div>
                 </div>
               </div>
-
-              {/* Détail calcul — comme sur la feuille de calcul */}
-              <div style={{background:"#060c16",borderRadius:10,padding:"14px",border:"1px solid #1a3a5f44",marginBottom:12}}>
-                <div style={{fontFamily:"system-ui",fontSize:11,color:"#475569",fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>📊 Détail du calcul</div>
-                {p.appelType==="eau" && (
-                  <div>
-                    {/* Index */}
-                    {(p.currentIndex||p.lastIndex) && (
-                      <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:12}}>
-                        <div style={{textAlign:"center"}}>
-                          <div style={{fontFamily:"system-ui",fontSize:10,color:"#475569",textTransform:"uppercase",marginBottom:3}}>Index précédent</div>
-                          <div style={{fontFamily:"system-ui",fontSize:15,fontWeight:700,color:"#94a3b8"}}>{p.lastIndex?fM3(p.lastIndex):"—"}</div>
-                        </div>
-                        <div style={{textAlign:"center"}}>
-                          <div style={{fontFamily:"system-ui",fontSize:10,color:"#475569",textTransform:"uppercase",marginBottom:3}}>Index actuel</div>
-                          <div style={{fontFamily:"system-ui",fontSize:15,fontWeight:700,color:"#38bdf8"}}>{p.currentIndex?fM3(p.currentIndex):"—"}</div>
-                        </div>
-                        <div style={{textAlign:"center"}}>
-                          <div style={{fontFamily:"system-ui",fontSize:10,color:"#475569",textTransform:"uppercase",marginBottom:3}}>Conso relevée</div>
-                          <div style={{fontFamily:"system-ui",fontSize:15,fontWeight:700,color:"#60a5fa"}}>{fM3(p.m3Raw||p.m3)} m³</div>
-                        </div>
-                      </div>
-                    )}
-                    {/* Formule de calcul */}
-                    <div style={{background:"#0a1628",borderRadius:8,padding:"10px 12px",fontFamily:"system-ui",fontSize:12}}>
-                      {p.adjustment!==undefined && p.adjustment!==0 && (
-                        <div style={{color:"#64748b",marginBottom:6}}>
-                          Ajustement (écart facture/relevés) : <span style={{color:"#f59e0b"}}>{p.adjustment>0?"+":""}{fM3(p.adjustment)} m³</span>
-                        </div>
-                      )}
-                      {p.m3Ajuste!==undefined && p.adjustment!==0 && (
-                        <div style={{color:"#64748b",marginBottom:6}}>
-                          Conso ajustée : <strong style={{color:"#38bdf8"}}>{fM3(p.m3Ajuste||p.m3)} m³</strong>
-                        </div>
-                      )}
-                      {p.priceM3 && (
-                        <div style={{color:"#64748b",marginBottom:4}}>
-                          <span style={{color:"#38bdf8",fontWeight:700}}>{fM3(p.m3Ajuste||p.m3)} m³</span>
-                          <span> × </span>
-                          <span style={{color:"#a78bfa",fontWeight:700}}>{p.priceM3.toFixed(4)} €/m³</span>
-                          <span> = </span>
-                          <strong style={{color:"#f59e0b",fontSize:15}}>{fEUR(p.amount)}</strong>
-                        </div>
-                      )}
-                    </div>
+              {/* Détail calcul */}
+              <div style={{background:"#060c16",borderRadius:10,padding:"12px",border:"1px solid #1a3a5f44",marginBottom:12}}>
+                {p.appelType==="eau"&&p.m3>0&&(
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6}}>
+                    <div style={{fontFamily:"system-ui",fontSize:12}}><span style={{color:"#64748b"}}>Conso : </span><strong style={{color:"#38bdf8"}}>{fM3(p.m3)} m³</strong></div>
+                    {p.priceM3&&<div style={{fontFamily:"system-ui",fontSize:12}}><span style={{color:"#64748b"}}>Prix m³ : </span><strong style={{color:"#a78bfa"}}>{Number(p.priceM3).toFixed(5)} €</strong></div>}
+                    {p.m3>0&&p.priceM3&&<div style={{fontFamily:"system-ui",fontSize:12,color:"#a78bfa",gridColumn:"1/-1"}}>{fM3(p.m3)} × {Number(p.priceM3).toFixed(5)} € = <strong>{fEUR(p.amount)}</strong></div>}
+                    {p.currentIndex&&<div style={{fontFamily:"system-ui",fontSize:11,color:"#475569",gridColumn:"1/-1"}}>Index : {fM3(p.lastIndex||0)} → {fM3(p.currentIndex)} m³</div>}
                   </div>
                 )}
-                {p.appelType==="assurance" && p.totalBill && (
-                  <div style={{fontFamily:"system-ui",fontSize:12,color:"#64748b"}}>
-                    {fEUR(p.totalBill)} ÷ parts égales = <strong style={{color:"#818cf8"}}>{fEUR(p.amount)}</strong>
-                  </div>
-                )}
-                {p.appelType==="autre" && (
-                  <div style={{fontFamily:"system-ui",fontSize:12,color:"#94a3b8"}}>
-                    Montant affecté : <strong style={{color:"#e2e8f0"}}>{fEUR(p.amount)}</strong>
-                  </div>
-                )}
+                {p.appelType==="assurance"&&<div style={{fontFamily:"system-ui",fontSize:12,color:"#818cf8"}}>Part égale de la cotisation : {fEUR(p.amount)}</div>}
               </div>
-
-              {/* Instructions virement */}
-              {copro.iban && (
+              {copro.iban&&(
                 <div style={{background:"#0a1e38",borderRadius:10,padding:"12px",border:"1px solid #2563eb44"}}>
                   <div style={{fontFamily:"system-ui",fontSize:11,color:"#3b82f6",fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>📤 Virement à effectuer</div>
                   <pre style={{fontFamily:"system-ui",fontSize:12,color:"#94a3b8",margin:0,whiteSpace:"pre-wrap"}}>{copro.iban}</pre>
                   <div style={{background:"#1d4ed833",borderRadius:7,padding:"7px 10px",marginTop:8,fontFamily:"system-ui",fontSize:12}}>
-                    <span style={{color:"#64748b"}}>Référence obligatoire : </span>
-                    <span style={{color:"#f0f9ff",fontWeight:700,letterSpacing:0.5}}>{p.appelTitle} — {user.name}</span>
+                    <span style={{color:"#64748b"}}>Référence : </span><strong style={{color:"#f0f9ff"}}>{p.appelTitle} — {user.name}</strong>
                   </div>
-                  <div style={{fontFamily:"system-ui",fontSize:11,color:"#475569",marginTop:8,fontStyle:"italic"}}>
-                    ✉️ Le syndic confirmera la réception. Votre statut passera à "Payé".
-                  </div>
+                  <div style={{fontFamily:"system-ui",fontSize:11,color:"#475569",marginTop:6,fontStyle:"italic"}}>✉️ Le syndic confirmera la réception.</div>
                 </div>
               )}
             </div>
@@ -1282,59 +713,36 @@ function Dashboard({ copro, user, isSyndic, balance, members, updateCopro }) {
         </Sec>
       )}
 
-      {!isSyndic && openReleves.length>0 && (
-        <InlineReleveForm appels={openReleves} user={user} copro={copro} update={updateCopro} />
-      )}
-
-      {/* Historique des index et consommations du membre */}
-      {!isSyndic && (() => {
-        const myUser = (copro.users||[]).find(u=>u.id===user.id);
-        const myReleves = (copro.appels||[])
-          .filter(a=>a.type==="eau"&&a.status!=="open")
-          .flatMap(a=>(a.releves||[]).filter(r=>r.ownerId===user.id).map(r=>({...r,appelTitle:a.title,appelDate:a.date,pm3:a.priceM3})))
+      {/* Historique index membre */}
+      {!isSyndic&&(()=>{
+        const myReleves=(copro.appels||[]).filter(a=>a.type==="eau"&&a.status!=="open")
+          .flatMap(a=>(a.payments||[]).filter(p=>p.owner===user.id&&p.currentIndex).map(p=>({...p,appelTitle:a.title,appelDate:a.date})))
           .sort((a,b)=>new Date(b.appelDate)-new Date(a.appelDate));
-
-        if (!myUser && !myReleves.length) return null;
+        if (!myUser&&!myReleves.length) return null;
         return (
-          <Sec title="📊 Mon historique de compteur">
-            {/* Index actuel */}
+          <Sec title="📊 Mon compteur">
             <div style={{...S.card,border:"1px solid #1a3a5f",marginBottom:10}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                 <div>
-                  <div style={{fontFamily:"system-ui",fontSize:12,color:"#64748b",marginBottom:4}}>
-                    Index enregistré sur votre compte
-                  </div>
-                  <div style={{fontFamily:"system-ui",fontSize:22,fontWeight:700,color:"#38bdf8"}}>
-                    {myUser?.lastIndex ? `${Number(myUser.lastIndex).toFixed(3)} m³` : "Non défini"}
-                  </div>
-                  <div style={{fontFamily:"system-ui",fontSize:11,color:"#475569",marginTop:3}}>
-                    🔒 Modifiable uniquement par l'administrateur
-                  </div>
+                  <div style={{fontFamily:"system-ui",fontSize:12,color:"#64748b",marginBottom:4}}>Index enregistré</div>
+                  <div style={{fontFamily:"system-ui",fontSize:22,fontWeight:700,color:"#38bdf8"}}>{myUser?.lastIndex?`${Number(myUser.lastIndex).toFixed(3)} m³`:"Non défini"}</div>
+                  <div style={{fontFamily:"system-ui",fontSize:11,color:"#475569",marginTop:3}}>🔒 Modifiable uniquement par le syndic</div>
                 </div>
                 <div style={{fontSize:32}}>🔢</div>
               </div>
             </div>
-
-            {/* Historique des relevés */}
-            {myReleves.length > 0 && (
+            {myReleves.length>0&&(
               <div style={{border:"1px solid #1a3a5f33",borderRadius:12,overflow:"hidden"}}>
                 <div style={{display:"grid",gridTemplateColumns:"2fr 1fr 1fr 1fr 1fr",background:"#060c16",padding:"9px 14px",borderBottom:"1px solid #1a3a5f22"}}>
-                  {["Période","Index préc.","Index actuel","Conso m³","Montant"].map(h=>(
-                    <div key={h} style={{fontFamily:"system-ui",fontSize:10,fontWeight:700,color:"#334155",letterSpacing:1,textTransform:"uppercase"}}>{h}</div>
-                  ))}
+                  {["Période","Préc.","Actuel","Conso","Montant"].map(h=><div key={h} style={{fontFamily:"system-ui",fontSize:10,fontWeight:700,color:"#334155",letterSpacing:1,textTransform:"uppercase"}}>{h}</div>)}
                 </div>
-                {myReleves.map((r,i)=>(
+                {myReleves.map((p,i)=>(
                   <div key={i} style={{display:"grid",gridTemplateColumns:"2fr 1fr 1fr 1fr 1fr",padding:"10px 14px",borderBottom:i<myReleves.length-1?"1px solid #1a3a5f11":"none",background:i%2===0?"#0c1829":"#090f1d",alignItems:"center"}}>
-                    <div>
-                      <div style={{fontFamily:"system-ui",fontSize:12,fontWeight:600,color:"#e2e8f0"}}>{r.appelTitle}</div>
-                      <div style={{fontFamily:"system-ui",fontSize:11,color:"#475569"}}>{fDATE(r.appelDate)}</div>
-                    </div>
-                    <div style={{fontFamily:"system-ui",fontSize:12,color:"#64748b"}}>{r.lastIndex ? Number(r.lastIndex).toFixed(3) : "—"}</div>
-                    <div style={{fontFamily:"system-ui",fontSize:12,color:"#38bdf8",fontWeight:600}}>{Number(r.currentIndex).toFixed(3)}</div>
-                    <div style={{fontFamily:"system-ui",fontSize:12,color:"#4ade80",fontWeight:600}}>{Number(r.m3).toFixed(3)}</div>
-                    <div style={{fontFamily:"system-ui",fontSize:12,color:"#f59e0b",fontWeight:700}}>
-                      {r.pm3 ? fEUR(r.m3*r.pm3) : "—"}
-                    </div>
+                    <div><div style={{fontFamily:"system-ui",fontSize:12,fontWeight:600,color:"#e2e8f0"}}>{p.appelTitle}</div><div style={{fontFamily:"system-ui",fontSize:11,color:"#475569"}}>{fDATE(p.appelDate)}</div></div>
+                    <div style={{fontFamily:"system-ui",fontSize:12,color:"#64748b"}}>{p.lastIndex?fM3(p.lastIndex):"—"}</div>
+                    <div style={{fontFamily:"system-ui",fontSize:12,color:"#38bdf8",fontWeight:600}}>{fM3(p.currentIndex)}</div>
+                    <div style={{fontFamily:"system-ui",fontSize:12,color:"#4ade80",fontWeight:600}}>{fM3(p.m3)}</div>
+                    <div style={{fontFamily:"system-ui",fontSize:12,color:p.paid?"#4ade80":"#f59e0b",fontWeight:700}}>{fEUR(p.amount)}</div>
                   </div>
                 ))}
               </div>
@@ -1343,46 +751,8 @@ function Dashboard({ copro, user, isSyndic, balance, members, updateCopro }) {
         );
       })()}
 
-      {/* Historique des paiements du membre */}
-      {!isSyndic && (() => {
-        const myHistory = (copro.appels||[])
-          .filter(a=>a.status!=="open")
-          .flatMap(a=>(a.payments||[]).filter(p=>p.owner===user.id&&Number(p.amount)>0).map(p=>({...p,appelTitle:a.title,appelDate:a.date,appelType:a.type})))
-          .sort((a,b)=>new Date(b.appelDate)-new Date(a.appelDate));
-        const totalPaye = myHistory.filter(p=>p.paid).reduce((s,p)=>s+Number(p.amount),0);
-        const totalDu   = myHistory.reduce((s,p)=>s+Number(p.amount),0);
-        if (!myHistory.length) return null;
-        return (
-          <Sec title="📋 Mes charges">
-            <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,marginBottom:14}}>
-              <MK label="Total dû"   val={fEUR(totalDu)}   color="#60a5fa"/>
-              <MK label="Payé"       val={fEUR(totalPaye)} color="#4ade80"/>
-              <MK label="Restant"    val={fEUR(totalDu-totalPaye)} color={totalDu-totalPaye>0?"#f59e0b":"#4ade80"}/>
-            </div>
-            {myHistory.map((p,i)=>(
-              <div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 14px",background:S.card.background,borderRadius:10,marginBottom:6,borderLeft:`3px solid ${p.paid?"#4ade80":"#f59e0b"}`}}>
-                <div>
-                  <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:2}}>
-                    <span>{p.appelType==="eau"?"💧":p.appelType==="assurance"?"🛡️":"📁"}</span>
-                    <span style={{fontFamily:"system-ui",fontSize:13,fontWeight:600,color:"#e2e8f0"}}>{p.appelTitle}</span>
-                  </div>
-                  <div style={{fontFamily:"system-ui",fontSize:11,color:"#64748b"}}>
-                    {fDATE(p.appelDate)}
-                    {p.paid&&p.paidDate?` · Payé le ${fDATE(p.paidDate)}`:""}
-                    {p.m3>0?` · ${fM3(p.m3)} m³`:""}
-                  </div>
-                </div>
-                <div style={{textAlign:"right"}}>
-                  <div style={{fontFamily:"system-ui",fontSize:14,fontWeight:700,color:p.paid?"#4ade80":"#f59e0b"}}>{fEUR(p.amount)}</div>
-                  <div style={{fontFamily:"system-ui",fontSize:10,color:p.paid?"#4ade80":"#f59e0b"}}>{p.paid?"✓ Payé":"En attente"}</div>
-                </div>
-              </div>
-            ))}
-          </Sec>
-        );
-      })()}
-
-      {isSyndic && members.length>0 && (
+      {/* État membres (syndic) */}
+      {isSyndic&&members.length>0&&(
         <Sec title="👥 État des membres">
           {members.map((m,i)=>{
             const owed=(copro.appels||[]).flatMap(a=>(a.payments||[]).filter(p=>p.owner===m.id&&!p.paid)).reduce((s,p)=>s+Number(p.amount),0);
@@ -1391,10 +761,14 @@ function Dashboard({ copro, user, isSyndic, balance, members, updateCopro }) {
                 <Av name={m.name} idx={i} size={36}/>
                 <div style={{flex:1}}>
                   <div style={{fontFamily:"system-ui",fontSize:13,fontWeight:600,color:"#e2e8f0"}}>{m.name}</div>
-                  <div style={{fontFamily:"system-ui",fontSize:11,color:"#475569"}}>{m.type==="proprietaire"?"🏠":"🔑"} {m.role}</div>
+                  <div style={{fontFamily:"system-ui",fontSize:11,color:"#475569"}}>
+                    {m.type==="proprietaire"?"🏠":"🔑"} {m.role}
+                    {m.lastIndex&&<span style={{color:"#38bdf8",marginLeft:8}}>Index : {fM3(m.lastIndex)} m³</span>}
+                    {!m.lastIndex&&<span style={{color:"#f59e0b",marginLeft:8}}>⚠️ Pas d'index</span>}
+                  </div>
                 </div>
                 {owed>0?<span style={{fontFamily:"system-ui",fontWeight:700,color:"#f59e0b",fontSize:13}}>Doit {fEUR(owed)}</span>
-                       :<span style={{fontFamily:"system-ui",fontSize:12,color:"#4ade80"}}>✓ À jour</span>}
+                  :<span style={{fontFamily:"system-ui",fontSize:12,color:"#4ade80"}}>✓ À jour</span>}
               </div>
             );
           })}
@@ -1404,18 +778,122 @@ function Dashboard({ copro, user, isSyndic, balance, members, updateCopro }) {
   );
 }
 
-// ─── Appels de fonds ──────────────────────────────────
+// ─── Saisie index inline (dashboard membre) ────────────────
+function InlineReleveForm({ appels, user, copro, update }) {
+  const [vals,setVals]=useState({});
+  const getLastIndex = () => (copro.users||[]).find(u=>u.id===user.id)?.lastIndex||null;
+
+  async function submit(appelId, currentIndex) {
+    const idx=Number(currentIndex);
+    if (!idx||idx<=0) return;
+    const lastIdx=getLastIndex();
+    const conso=lastIdx?Math.max(0,idx-lastIdx):idx;
+    const newAppels=(copro.appels||[]).map(a=>{
+      if (a.id!==appelId) return a;
+      const releves=[...(a.releves||[]).filter(r=>r.ownerId!==user.id),
+        {ownerId:user.id,ownerName:user.name,currentIndex:idx,lastIndex:lastIdx,m3:conso,enteredAt:new Date().toISOString()}];
+      return {...a,releves};
+    });
+    // Ne pas mettre à jour lastIndex ici — sera fait lors de la validation du calcul
+    await update({appels:newAppels});
+    setVals(p=>({...p,[appelId]:""}));
+  }
+
+  return (
+    <Sec title="💧 Facture eau — Saisissez votre index">
+      {appels.map(a=>{
+        const r=(a.releves||[]).find(rv=>rv.ownerId===user.id);
+        const lastIdx=getLastIndex();
+        const cur=vals[a.id]||"";
+        const previewConso=cur&&lastIdx?Math.max(0,Number(cur)-lastIdx):cur?Number(cur):null;
+        const pm3=a.priceM3||(copro.refPriceM3?Number(copro.refPriceM3):null);
+        const previewEur=previewConso!=null&&pm3?previewConso*pm3:null;
+        return (
+          <div key={a.id} style={{...S.card,border:`1px solid ${r?"#166834":"#f59e0b55"}`}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:14}}>
+              <div>
+                <div style={{fontFamily:"system-ui",fontSize:15,fontWeight:700,color:"#f0f9ff"}}>💧 {a.title}</div>
+                <div style={{fontFamily:"system-ui",fontSize:12,color:"#64748b",marginTop:3}}>
+                  {fDATE(a.date)}{a.totalBill&&<span style={{color:"#f59e0b",marginLeft:8}}>Facture : {fEUR(a.totalBill)}</span>}
+                </div>
+              </div>
+              <span style={{fontFamily:"system-ui",fontSize:11,padding:"3px 10px",borderRadius:20,background:r?"#14532d":"#f59e0b22",color:r?"#4ade80":"#f59e0b"}}>
+                {r?"✓ Saisi":"⏳ À saisir"}
+              </span>
+            </div>
+            {r?(
+              <div style={{background:"#14532d22",borderRadius:10,padding:"14px",border:"1px solid #166834"}}>
+                <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:12,marginBottom:12}}>
+                  {[["Index préc.", r.lastIndex?fM3(r.lastIndex):"—","#64748b"],["Index actuel",fM3(r.currentIndex),"#38bdf8"],["Consommation",fM3(r.m3)+" m³","#4ade80"]].map(([l,v,c])=>(
+                    <div key={l} style={{textAlign:"center"}}>
+                      <div style={{fontFamily:"system-ui",fontSize:10,color:"#64748b",textTransform:"uppercase",letterSpacing:1,marginBottom:4}}>{l}</div>
+                      <div style={{fontFamily:"system-ui",fontSize:16,fontWeight:700,color:c}}>{v}</div>
+                    </div>
+                  ))}
+                </div>
+                {pm3&&<div style={{background:"#060c16",borderRadius:8,padding:"10px",fontFamily:"system-ui",fontSize:13,textAlign:"center"}}>
+                  {fM3(r.m3)} m³ × {pm3.toFixed(5)} € = <strong style={{color:"#f59e0b"}}>{fEUR(r.m3*pm3)}</strong>
+                  <div style={{color:"#475569",fontSize:11,marginTop:2}}>Estimation — montant exact calculé quand tous ont saisi</div>
+                </div>}
+                <div style={{textAlign:"right",marginTop:10}}>
+                  <button onClick={()=>update({appels:(copro.appels||[]).map(x=>x.id!==a.id?x:{...x,releves:(x.releves||[]).filter(rv=>rv.ownerId!==user.id)})})}
+                    style={{background:"none",border:"1px solid #1a3a5f",color:"#64748b",padding:"5px 14px",borderRadius:8,cursor:"pointer",fontFamily:"system-ui",fontSize:12}}>
+                    ✏️ Modifier
+                  </button>
+                </div>
+              </div>
+            ):(
+              <div>
+                {lastIdx&&<div style={{background:"#0a1628",borderRadius:8,padding:"10px 12px",marginBottom:12,fontFamily:"system-ui",fontSize:12,display:"flex",justifyContent:"space-between"}}>
+                  <span style={{color:"#64748b"}}>Votre dernier index enregistré :</span>
+                  <strong style={{color:"#38bdf8"}}>{fM3(lastIdx)} m³</strong>
+                </div>}
+                <FL label="Votre index actuel (relevé sur votre compteur)">
+                  <div style={{display:"flex",gap:10}}>
+                    <div style={{position:"relative",flex:1}}>
+                      <input type="number" min="0" step="0.001" value={cur}
+                        onChange={e=>setVals(p=>({...p,[a.id]:e.target.value}))}
+                        onKeyDown={e=>e.key==="Enter"&&submit(a.id,cur)}
+                        placeholder={lastIdx?`> ${fM3(lastIdx)}`:"ex: 1547.250"}
+                        autoFocus style={{...S.inp,paddingRight:42,fontSize:16,fontWeight:600}}/>
+                      <span style={{position:"absolute",right:12,top:"50%",transform:"translateY(-50%)",color:"#38bdf8",fontFamily:"system-ui",fontSize:13,fontWeight:700}}>m³</span>
+                    </div>
+                    <button onClick={()=>submit(a.id,cur)}
+                      disabled={!cur||Number(cur)<=0||(lastIdx&&Number(cur)<lastIdx)}
+                      style={{padding:"0 22px",borderRadius:10,border:"none",background:(!cur||Number(cur)<=0)?"#1e3a5f":"linear-gradient(135deg,#059669,#10b981)",color:(!cur||Number(cur)<=0)?"#475569":"#fff",fontFamily:"system-ui",fontSize:14,fontWeight:700,cursor:(!cur||Number(cur)<=0)?"not-allowed":"pointer",whiteSpace:"nowrap"}}>
+                      ✓ Valider
+                    </button>
+                  </div>
+                </FL>
+                {previewConso!=null&&previewConso>=0&&(
+                  <div style={{background:"#0a1628",borderRadius:10,padding:"12px",border:"1px solid #1a3a5f44",marginTop:4}}>
+                    <div style={{display:"flex",justifyContent:"space-between",fontFamily:"system-ui",fontSize:13,marginBottom:lastIdx?6:0}}>
+                      <span style={{color:"#64748b"}}>Consommation calculée :</span>
+                      <strong style={{color:"#38bdf8"}}>{fM3(previewConso)} m³</strong>
+                    </div>
+                    {lastIdx&&<div style={{fontFamily:"system-ui",fontSize:11,color:"#475569",marginBottom:previewEur?8:0}}>{Number(cur).toFixed(3)} − {fM3(lastIdx)} = {fM3(previewConso)} m³</div>}
+                    {previewEur!=null&&<div style={{display:"flex",justifyContent:"space-between",fontFamily:"system-ui",fontSize:14,fontWeight:700}}>
+                      <span style={{color:"#64748b"}}>Votre part estimée :</span>
+                      <span style={{color:"#f59e0b"}}>{fEUR(previewEur)}</span>
+                    </div>}
+                  </div>
+                )}
+                {lastIdx&&cur&&Number(cur)<lastIdx&&Number(cur)>0&&(
+                  <div style={{fontFamily:"system-ui",fontSize:12,color:"#f87171",marginTop:6}}>⚠️ L'index actuel ne peut pas être inférieur à l'index précédent ({fM3(lastIdx)} m³)</div>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </Sec>
+  );
+}
+
+// ─── Appels de fonds ──────────────────────────────────────
 function AppelsTab({ copro, members, update }) {
-  const [show,  setShow]  = useState(false);
-  const [type,  setType]  = useState("eau");
-  const [title, setTitle] = useState("");
-  const [date,  setDate]  = useState(TODAY());
-  const [note,  setNote]  = useState("");
-  const [bill,  setBill]  = useState("");
-  const [invM3, setInvM3] = useState("");
-  const [mAmts,   setMAmts]   = useState({});
-  const [mConsos, setMConsos] = useState({});
-  const [saisieMode, setSaisieMode] = useState('syndic'); // 'syndic' | 'membres'
+  const [show,setShow]=useState(false), [type,setType]=useState("eau"), [title,setTitle]=useState(""), [date,setDate]=useState(TODAY()), [note,setNote]=useState("");
+  const [bill,setBill]=useState(""), [invM3,setInvM3]=useState(""), [mAmts,setMAmts]=useState({});
 
   function handleBill(v) {
     setBill(v);
@@ -1423,31 +901,19 @@ function AppelsTab({ copro, members, update }) {
       setInvM3((Number(v)/Number(copro.refPriceM3)).toFixed(3));
   }
 
-  const priceM3    = invM3&&bill&&Number(invM3)>0 ? Number(bill)/Number(invM3) : null;
-  const totalConso = members.reduce((s,m)=>s+(Number(mConsos[m.id])||0),0);
+  // Membres sans index défini
+  const membersNoIndex=members.filter(m=>!m.lastIndex);
 
-  const canCreate =
-    type==="eau"        ? (title.trim() && bill && Number(bill)>0 && invM3 && Number(invM3)>0)
-    : type==="assurance" ? (title.trim() && copro.assuranceAnnuelle && Number(copro.assuranceAnnuelle)>0)
-    :                      (title.trim() && members.length>0 && members.every(m=>mAmts[m.id]&&!isNaN(Number(mAmts[m.id]))));
+  const canCreate=type==="eau"?(title.trim()&&bill&&Number(bill)>0&&invM3&&Number(invM3)>0)
+    :type==="assurance"?(title.trim()&&copro.assuranceAnnuelle&&Number(copro.assuranceAnnuelle)>0)
+    :(title.trim()&&members.length>0&&members.every(m=>mAmts[m.id]&&!isNaN(Number(mAmts[m.id]))));
 
   async function create() {
-    let ap = {id:uid(),title:title.trim(),date,note,type,status:"active",createdAt:new Date().toISOString()};
+    let ap={id:uid(),title:title.trim(),date,note,type,status:"active",createdAt:new Date().toISOString()};
     if (type==="eau") {
-      const bill_n = Number(bill);
-      // Prix m³ : depuis paramètres ou saisi manuellement
-      const pm3 = copro.refPriceM3 && Number(copro.refPriceM3)>0
-        ? Number(copro.refPriceM3)
-        : invM3 && Number(invM3)>0 ? Number(invM3) : null;
-      // Appel créé en statut "open" — chaque membre saisit son index
-      ap = {
-        ...ap,
-        totalBill: bill_n,
-        priceM3: pm3,
-        status: "open",
-        releves: [],   // index saisis par chaque membre
-        payments: members.map(m=>({ owner:m.id, ownerName:m.name, amount:0, m3:0, paid:false, paidDate:null }))
-      };
+      ap={...ap,totalBill:Number(bill),invoiceM3:Number(invM3),
+        status:"open",releves:[],
+        payments:members.map(m=>({owner:m.id,ownerName:m.name,amount:0,m3:0,paid:false,paidDate:null}))};
     } else if (type==="assurance") {
       const total=Number(copro.assuranceAnnuelle);
       const shares=splitEqual(total,members.length);
@@ -1457,32 +923,38 @@ function AppelsTab({ copro, members, update }) {
       ap={...ap,totalBill:pmts.reduce((s,p)=>s+p.amount,0),payments:pmts};
     }
     await update({appels:[ap,...(copro.appels||[])]});
-    setTitle(""); setBill(""); setInvM3(""); setNote(""); setMAmts({}); setMConsos({}); setSaisieMode("syndic"); setShow(false);
+    setTitle(""); setBill(""); setInvM3(""); setNote(""); setMAmts({}); setShow(false);
   }
 
+  // Validation : utilise calcEauParts — FONCTION UNIQUE
   async function validateReleves(id) {
-    const appels=(copro.appels||[]).map(a=>{
-      if (a.id!==id) return a;
-      const invoiceM3 = a.invoiceM3;
-      if (!invoiceM3) return a;
-      // Utilise le moteur de calcul exact (avec ajustement proportionnel)
-      const payments = calcEauParts(a.releves, a.totalBill, invoiceM3);
-      if (!payments) return a;
-      const tc = a.releves.reduce((s,r)=>s+Number(r.m3),0);
-      const pm3 = a.totalBill / invoiceM3;
-      return { ...a, payments, totalConso:tc, priceM3:pm3, status:"active" };
+    const appel=(copro.appels||[]).find(a=>a.id===id);
+    if (!appel||!appel.invoiceM3) return;
+    const payments=calcEauParts(appel.releves, appel.totalBill, appel.invoiceM3);
+    if (!payments) return;
+    const tc=appel.releves.reduce((s,r)=>s+Number(r.m3),0);
+    const pm3=appel.totalBill/appel.invoiceM3;
+    const newAppels=(copro.appels||[]).map(a=>a.id!==id?a:{...a,payments,totalConso:tc,priceM3:pm3,status:"active"});
+    // Mettre à jour lastIndex de chaque membre
+    const newUsers=(copro.users||[]).map(u=>{
+      const r=appel.releves.find(rv=>rv.ownerId===u.id);
+      if (!r?.currentIndex) return u;
+      return {...u,lastIndex:r.currentIndex,indexHistory:[...(u.indexHistory||[]),{index:r.currentIndex,previousIndex:r.lastIndex,m3:r.m3,date:new Date().toISOString()}]};
     });
-    await update({appels});
+    await update({appels:newAppels,users:newUsers});
   }
 
-  // Auto-validation quand tous les membres ont saisi
-  useEffect(() => {
-    const openEau = (copro.appels||[]).filter(a=>a.type==="eau"&&a.status==="open");
-    openEau.forEach(a => {
-      const allIn = members.length > 0 && (a.releves||[]).length >= members.length;
-      if (allIn) validateReleves(a.id);
+  // Auto-validation protégée contre les boucles
+  const validatingRef=useRef(new Set());
+  useEffect(()=>{
+    (copro.appels||[]).filter(a=>a.type==="eau"&&a.status==="open").forEach(a=>{
+      const allIn=members.length>0&&(a.releves||[]).length>=members.length;
+      if (allIn&&!validatingRef.current.has(a.id)) {
+        validatingRef.current.add(a.id);
+        validateReleves(a.id).finally(()=>validatingRef.current.delete(a.id));
+      }
     });
-  }, [copro.appels]);
+  },[copro.appels]);
 
   async function togglePaid(appelId,ownerId) {
     const appels=(copro.appels||[]).map(a=>{
@@ -1492,142 +964,75 @@ function AppelsTab({ copro, members, update }) {
     });
     await update({appels});
   }
-
-  async function delAppel(id) {
-    if (!confirm("Supprimer ?")) return;
-    await update({appels:(copro.appels||[]).filter(a=>a.id!==id)});
-  }
+  async function delAppel(id) { if (!confirm("Supprimer cet appel ?")) return; await update({appels:(copro.appels||[]).filter(a=>a.id!==id)}); }
 
   const sorted=[...(copro.appels||[])].sort((a,b)=>new Date(b.date)-new Date(a.date));
-
   return (
     <div>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
         <h2 style={S.h2}>Appels de fonds</h2>
         <Btn small onClick={()=>setShow(!show)}>{show?"✕ Annuler":"+ Nouvel appel"}</Btn>
       </div>
-
-      {members.length===0&&show&&(
-        <div style={{...S.card,border:"1px solid #f59e0b44",marginBottom:14}}>
-          <div style={{fontFamily:"system-ui",fontSize:13,color:"#fde68a"}}>⚠️ Aucun membre actif dans cette copropriété. Ajoutez d'abord des utilisateurs depuis l'espace Admin.</div>
-        </div>
-      )}
-
-      {show && (
+      {members.length===0&&show&&<div style={{...S.card,border:"1px solid #f59e0b44",marginBottom:14}}><div style={{fontFamily:"system-ui",fontSize:13,color:"#fde68a"}}>⚠️ Aucun membre actif. Ajoutez d'abord des utilisateurs.</div></div>}
+      {show&&(
         <div style={S.card}>
           <div style={{display:"flex",gap:8,marginBottom:18}}>
             {[{id:"eau",l:"💧 Eau"},{id:"assurance",l:"🛡️ Assurance"},{id:"autre",l:"📁 Autre"}].map(t=>(
               <button key={t.id} onClick={()=>setType(t.id)} style={{flex:1,padding:"9px 4px",borderRadius:10,border:`2px solid ${type===t.id?"#2563eb":"#1a3a5f"}`,background:type===t.id?"#1d4ed822":"transparent",color:type===t.id?"#7dd3fc":"#64748b",fontFamily:"system-ui",fontWeight:700,fontSize:13,cursor:"pointer"}}>{t.l}</button>
             ))}
           </div>
-
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
             <FL label="Titre *"><FI value={title} onChange={setTitle} placeholder={type==="eau"?"Eau T2 2025":type==="assurance"?"Assurance 2025":"Libellé"}/></FL>
             <FL label="Date"><input type="date" value={date} onChange={e=>setDate(e.target.value)} style={S.inp}/></FL>
           </div>
-
-          {type==="eau" && (
-            <div style={{background:"#060c16",borderRadius:12,padding:"18px",border:"1px solid #1a3a5f",marginBottom:4}}>
-              <div style={{fontFamily:"system-ui",fontSize:13,fontWeight:700,color:"#60a5fa",marginBottom:16}}>
-                💧 Facture d'eau
-              </div>
-
-              {/* Montant TTC */}
-              <FL label="Montant total TTC à rembourser (€)">
+          {type==="eau"&&(
+            <>
+              {membersNoIndex.length>0&&<div style={{background:"#450a0a22",borderRadius:10,padding:"10px 14px",border:"1px solid #7f1d1d44",marginBottom:14,fontFamily:"system-ui",fontSize:12}}>
+                <span style={{color:"#f87171"}}>⚠️ Ces membres n'ont pas d'index défini : </span>
+                <strong style={{color:"#fca5a5"}}>{membersNoIndex.map(m=>m.name).join(", ")}</strong>
+                <div style={{color:"#64748b",marginTop:4}}>→ Allez dans 🔢 Compteurs pour définir leur index de départ.</div>
+              </div>}
+              <FL label="💶 Montant total TTC de la facture (€)">
                 <NIn value={bill} onChange={handleBill} placeholder="0.00" unit="€"/>
               </FL>
-
-              {/* m³ total facturé — OBLIGATOIRE */}
-              <FL label="💧 Total m³ indiqué sur la facture *">
+              <FL label="💧 Volume total consommé (m³ — indiqué sur la facture)">
                 <NIn value={invM3} onChange={setInvM3} placeholder="ex: 195.000" unit="m³"/>
-                {invM3 && bill && Number(invM3)>0 && Number(bill)>0 && (
-                  <div style={{fontFamily:"system-ui",fontSize:12,color:"#a78bfa",marginTop:5}}>
-                    Prix m³ : <strong>{(Number(bill)/Number(invM3)).toFixed(4)} €/m³</strong>
-                  </div>
-                )}
-                {!invM3 && copro.refPriceM3 && bill && Number(bill)>0 && (
-                  <div style={{fontFamily:"system-ui",fontSize:11,color:"#64748b",marginTop:5}}>
-                    Estimation depuis tarif : {(Number(bill)/Number(copro.refPriceM3)).toFixed(3)} m³
-                    <button onClick={()=>setInvM3((Number(bill)/Number(copro.refPriceM3)).toFixed(3))}
-                      style={{marginLeft:8,background:"none",border:"none",color:"#3b82f6",cursor:"pointer",fontSize:11,textDecoration:"underline"}}>
-                      Utiliser
-                    </button>
+                {invM3&&bill&&Number(invM3)>0&&Number(bill)>0&&(
+                  <div style={{fontFamily:"system-ui",fontSize:13,color:"#a78bfa",marginTop:6,fontWeight:600}}>
+                    Prix du m³ : {(Number(bill)/Number(invM3)).toFixed(5)} €
                   </div>
                 )}
               </FL>
-
-              {/* Explication du fonctionnement */}
-              <div style={{background:"#0a1e38",borderRadius:10,padding:"12px 14px",border:"1px solid #2563eb33",marginTop:4}}>
-                <div style={{fontFamily:"system-ui",fontSize:12,fontWeight:700,color:"#60a5fa",marginBottom:8}}>
-                  ℹ️ Comment ça marche
-                </div>
-                <div style={{fontFamily:"system-ui",fontSize:12,color:"#64748b",lineHeight:1.8}}>
-                  1. Vous créez cet appel avec le montant de la facture<br/>
-                  2. Chaque propriétaire se connecte et saisit son <strong style={{color:"#e2e8f0"}}>index actuel</strong> du compteur<br/>
-                  3. L'app calcule automatiquement : <strong style={{color:"#38bdf8"}}>index actuel − index précédent = m³ consommés</strong><br/>
-                  4. Chaque propriétaire voit exactement <strong style={{color:"#4ade80"}}>ce qu'il vous doit en €</strong>
-                </div>
-                {members.length > 0 && (
-                  <div style={{marginTop:12,paddingTop:10,borderTop:"1px solid #1a3a5f33"}}>
-                    <div style={{fontFamily:"system-ui",fontSize:11,color:"#475569",marginBottom:6}}>Index précédents enregistrés :</div>
-                    {members.map((m,i)=>{
-                      const lastIdx = m.lastIndex;
-                      return (
-                        <div key={i} style={{display:"flex",justifyContent:"space-between",fontFamily:"system-ui",fontSize:12,color:"#64748b",marginBottom:3}}>
-                          <span>{m.name}</span>
-                          <span style={{color: lastIdx ? "#38bdf8" : "#f59e0b"}}>
-                            {lastIdx ? `Index précédent : ${fM3(lastIdx)} m³` : "⚠️ Premier relevé (pas d'index précédent)"}
-                          </span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            </div>
+            </>
           )}
-
-          {type==="assurance" && <>
-            {copro.assuranceAnnuelle&&Number(copro.assuranceAnnuelle)>0
-              ? <div style={{background:"#0f0f2a",borderRadius:10,padding:"12px",border:"1px solid #818cf844",marginBottom:14}}>
-                  <div style={{fontFamily:"system-ui",fontSize:12,color:"#818cf8",fontWeight:700,marginBottom:8}}>Parts égales — {fEUR(Number(copro.assuranceAnnuelle))} total</div>
-                  {members.map((m,i)=>(
-                    <div key={i} style={{display:"flex",justifyContent:"space-between",fontFamily:"system-ui",fontSize:13,color:"#94a3b8",marginBottom:4}}>
-                      <span>{m.name}</span><span style={{color:"#4ade80",fontWeight:700}}>{fEUR(splitEqual(Number(copro.assuranceAnnuelle),members.length)[i])}</span>
-                    </div>
-                  ))}
-                </div>
-              : <Err>Renseignez d'abord la cotisation annuelle dans ⚙️ Paramètres.</Err>
-            }
-          </>}
-
-          {type==="autre" && members.map((m,i)=>(
-            <FL key={i} label={m.name}><NIn value={mAmts[m.id]||""} onChange={v=>setMAmts(p=>({...p,[m.id]:v}))} placeholder="0.00" unit="€"/></FL>
-          ))}
-
+          {type==="assurance"&&(
+            copro.assuranceAnnuelle&&Number(copro.assuranceAnnuelle)>0
+              ?<div style={{background:"#0f0f2a",borderRadius:10,padding:"12px",border:"1px solid #818cf844",marginBottom:14}}>
+                <div style={{fontFamily:"system-ui",fontSize:12,color:"#818cf8",fontWeight:700,marginBottom:8}}>Parts égales — {fEUR(Number(copro.assuranceAnnuelle))} total</div>
+                {members.map((m,i)=><div key={i} style={{display:"flex",justifyContent:"space-between",fontFamily:"system-ui",fontSize:13,color:"#94a3b8",marginBottom:4}}><span>{m.name}</span><span style={{color:"#4ade80",fontWeight:700}}>{fEUR(splitEqual(Number(copro.assuranceAnnuelle),members.length)[i])}</span></div>)}
+              </div>
+              :<Err>Renseignez la cotisation annuelle dans ⚙️ Paramètres.</Err>
+          )}
+          {type==="autre"&&members.map((m,i)=><FL key={i} label={m.name}><NIn value={mAmts[m.id]||""} onChange={v=>setMAmts(p=>({...p,[m.id]:v}))} placeholder="0.00" unit="€"/></FL>)}
           <FL label="Note (optionnel)"><FI value={note} onChange={setNote} placeholder="Référence facture…"/></FL>
           <Btn disabled={!canCreate||members.length===0} onClick={create} full>Créer l'appel de fonds</Btn>
         </div>
       )}
-
       {sorted.length===0&&!show&&<Empty>Aucun appel de fonds.</Empty>}
-
       {sorted.map(a=>{
-        const tDu  =(a.payments||[]).reduce((s,p)=>s+Number(p.amount),0);
-        const tPay =(a.payments||[]).filter(p=>p.paid).reduce((s,p)=>s+Number(p.amount),0);
+        const tDu=(a.payments||[]).reduce((s,p)=>s+Number(p.amount),0);
+        const tPay=(a.payments||[]).filter(p=>p.paid).reduce((s,p)=>s+Number(p.amount),0);
         const allIn=(a.releves?.length||0)>=members.length&&members.length>0;
-        const bc   =a.status==="complete"?"#4ade80":a.status==="open"?"#f59e0b":"#3b82f6";
+        const bc=a.status==="complete"?"#4ade80":a.status==="open"?"#f59e0b":"#3b82f6";
         return (
           <div key={a.id} style={{...S.card,marginBottom:14,borderLeft:`4px solid ${bc}`}}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
               <div>
-                <div style={{fontFamily:"system-ui",fontSize:14,fontWeight:700,color:"#f0f9ff"}}>
-                  {a.type==="eau"?"💧":a.type==="assurance"?"🛡️":"📁"} {a.title}
-                </div>
+                <div style={{fontFamily:"system-ui",fontSize:14,fontWeight:700,color:"#f0f9ff"}}>{a.type==="eau"?"💧":a.type==="assurance"?"🛡️":"📁"} {a.title}</div>
                 <div style={{fontFamily:"system-ui",fontSize:11,color:"#64748b",marginTop:2,display:"flex",gap:10,flexWrap:"wrap"}}>
                   <span>{fDATE(a.date)}</span>
-                  {a.invoiceM3!=null&&<span style={{color:"#38bdf8"}}>{a.invoiceM3.toFixed(3)} m³</span>}
-                  {a.priceM3!=null&&<span style={{color:"#a78bfa"}}>{a.priceM3.toFixed(5)} €/m³</span>}
+                  {a.invoiceM3&&<span style={{color:"#38bdf8"}}>{Number(a.invoiceM3).toFixed(3)} m³</span>}
+                  {a.priceM3&&<span style={{color:"#a78bfa"}}>{Number(a.priceM3).toFixed(5)} €/m³</span>}
                   {a.note&&<span>· {a.note}</span>}
                 </div>
               </div>
@@ -1638,34 +1043,35 @@ function AppelsTab({ copro, members, update }) {
                 <SBadge status={a.status}/>
               </div>
             </div>
-
             {a.type==="eau"&&a.status==="open"&&(
               <div style={{background:"#060c16",borderRadius:10,padding:"12px",marginBottom:10,border:"1px solid #f59e0b33"}}>
-                <div style={{fontFamily:"system-ui",fontSize:12,fontWeight:700,color:"#f59e0b",marginBottom:8}}>Relevés reçus</div>
+                <div style={{fontFamily:"system-ui",fontSize:12,fontWeight:700,color:"#f59e0b",marginBottom:8}}>Relevés reçus ({(a.releves||[]).length}/{members.length})</div>
                 {members.map((m,i)=>{
                   const r=(a.releves||[]).find(rv=>rv.ownerId===m.id);
                   return <div key={i} style={{display:"flex",justifyContent:"space-between",fontFamily:"system-ui",fontSize:13,color:"#94a3b8",marginBottom:4}}>
                     <span>{m.name}</span>
-                    {r?<span style={{color:"#4ade80"}}>✓ {fM3(r.m3)} m³</span>:<span style={{color:"#f59e0b"}}>En attente…</span>}
+                    {r?<span style={{color:"#4ade80"}}>✓ Index {fM3(r.currentIndex)} m³ (conso: {fM3(r.m3)} m³)</span>
+                      :<span style={{color:"#f59e0b"}}>En attente…</span>}
                   </div>;
                 })}
-                {allIn&&<button onClick={()=>validateReleves(a.id)} style={{width:"100%",marginTop:10,padding:"9px",borderRadius:9,border:"none",background:"linear-gradient(135deg,#059669,#10b981)",color:"#fff",fontFamily:"system-ui",fontSize:13,fontWeight:700,cursor:"pointer"}}>✓ Valider et calculer les parts</button>}
+                {allIn&&<div style={{background:"#14532d22",borderRadius:8,padding:"8px",marginTop:8,fontFamily:"system-ui",fontSize:12,color:"#4ade80",textAlign:"center"}}>✅ Tous les relevés reçus — calcul en cours…</div>}
               </div>
             )}
-
             {a.status!=="open"&&tDu>0&&(
               <div style={{height:5,background:"#1a3a5f",borderRadius:3,marginBottom:12,overflow:"hidden"}}>
-                <div style={{height:"100%",width:`${(tPay/tDu)*100}%`,background:"linear-gradient(90deg,#3b82f6,#4ade80)",borderRadius:3,transition:"width 0.4s"}}/>
+                <div style={{height:"100%",width:`${Math.min(100,(tPay/tDu)*100)}%`,background:"linear-gradient(90deg,#3b82f6,#4ade80)",borderRadius:3,transition:"width 0.4s"}}/>
               </div>
             )}
-
             {a.status!=="open"&&(a.payments||[]).map((p,i)=>(
               <div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"9px 12px",borderRadius:9,background:p.paid?"#14532d22":"#1a3a5f22",marginBottom:6,border:`1px solid ${p.paid?"#166834":"#1a3a5f"}`}}>
                 <div style={{display:"flex",gap:10,alignItems:"center"}}>
                   <button onClick={()=>togglePaid(a.id,p.owner)} style={{width:26,height:26,borderRadius:7,border:`2px solid ${p.paid?"#4ade80":"#3b82f6"}`,background:p.paid?"#4ade80":"transparent",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,color:"#0a1628",flexShrink:0}}>{p.paid?"✓":""}</button>
                   <div>
                     <div style={{fontFamily:"system-ui",fontSize:13,color:p.paid?"#86efac":"#e2e8f0",fontWeight:600}}>{p.ownerName}</div>
-                    {a.type==="eau"&&p.m3>0&&<div style={{fontFamily:"system-ui",fontSize:11,color:"#38bdf8"}}>{fM3(p.m3)} m³ {a.priceM3&&<span style={{color:"#a78bfa"}}>· {fM3(p.m3)} × {a.priceM3.toFixed(5)} €</span>}</div>}
+                    {a.type==="eau"&&p.m3>0&&<div style={{fontFamily:"system-ui",fontSize:11,color:"#38bdf8"}}>
+                      {fM3(p.lastIndex||0)} → {fM3(p.currentIndex||0)} m³ | conso: {fM3(p.m3)} m³
+                      {p.adjustment&&p.adjustment!==0&&<span style={{color:"#64748b"}}> (ajust. {p.adjustment>0?"+":""}{fM3(p.adjustment)})</span>}
+                    </div>}
                   </div>
                 </div>
                 <div style={{textAlign:"right"}}>
@@ -1684,78 +1090,110 @@ function AppelsTab({ copro, members, update }) {
   );
 }
 
-// ─── Relevé (membre) ──────────────────────────────────
-function ReleveTab({ copro, user, update }) {
-  const openEau=(copro.appels||[]).filter(a=>a.type==="eau"&&a.status==="open");
-  const [vals,setVals]=useState({});
+// ─── Compteurs (syndic) ────────────────────────────────────
+function CompteursTab({ copro, update }) {
   const members=(copro.users||[]).filter(u=>u.active&&u.id!=="__admin__");
-
-  async function submit(appelId,m3val) {
-    if (!m3val||Number(m3val)<=0) return;
-    const appels=(copro.appels||[]).map(a=>{
-      if (a.id!==appelId) return a;
-      const releves=[...(a.releves||[]).filter(r=>r.ownerId!==user.id),{ownerId:user.id,ownerName:user.name,m3:Number(m3val),enteredAt:new Date().toISOString()}];
-      return {...a,releves};
-    });
-    await update({appels});
-    setVals(p=>({...p,[appelId]:""}));
+  const [indexes,setIndexes]=useState(Object.fromEntries(members.map(m=>[m.id,m.lastIndex||""])));
+  const [pwd,setPwd]=useState(""), [verified,setVerified]=useState(false), [err,setErr]=useState(""), [saved,setSaved]=useState(false);
+  const adminPwd=copro.adminPin||"";
+  function verify() {
+    if (!adminPwd) { if(pwd.length>=4){setVerified(true);setErr("");}else setErr("Min. 4 caractères."); return; }
+    if (pwd===adminPwd) { setVerified(true); setErr(""); }
+    else setErr("Code incorrect.");
   }
-
-  if (!openEau.length) return (
-    <div><h2 style={S.h2}>Mon relevé d'eau</h2>
-    <Empty>Aucun relevé à saisir.<br/>Le syndic vous contactera à la prochaine facture.</Empty></div>
-  );
-
+  async function saveIndexes() {
+    const users=(copro.users||[]).map(u=>{
+      const newIdx=indexes[u.id];
+      if (newIdx!==undefined&&newIdx!=="") return {...u,lastIndex:Number(newIdx),indexHistory:[...(u.indexHistory||[]),{index:Number(newIdx),date:new Date().toISOString(),setBy:"syndic"}]};
+      return u;
+    });
+    await update({users}); setSaved(true); setTimeout(()=>setSaved(false),2500);
+  }
   return (
     <div>
-      <h2 style={S.h2}>Mon relevé d'eau</h2>
-      {openEau.map(a=>{
-        const r=(a.releves||[]).find(rv=>rv.ownerId===user.id);
-        const total=(a.releves||[]).reduce((s,rv)=>s+rv.m3,0);
-        return (
-          <div key={a.id} style={{...S.card,border:`1px solid ${r?"#166834":"#2563eb44"}`}}>
-            <div style={{display:"flex",justifyContent:"space-between",marginBottom:16}}>
-              <div>
-                <div style={{fontFamily:"system-ui",fontSize:16,fontWeight:700,color:"#f0f9ff"}}>💧 {a.title}</div>
-                <div style={{fontFamily:"system-ui",fontSize:12,color:"#64748b"}}>{fDATE(a.date)}</div>
-                {a.totalBill&&<div style={{fontFamily:"system-ui",fontSize:13,color:"#f59e0b",fontWeight:600,marginTop:4}}>Facture : {fEUR(a.totalBill)}</div>}
-              </div>
-              <div style={{fontFamily:"system-ui",fontSize:12,color:"#64748b"}}>{(a.releves||[]).length}/{members.length} reçus</div>
-            </div>
-            {r?(
-              <div style={{background:"#14532d22",borderRadius:10,padding:"16px",border:"1px solid #166834",textAlign:"center"}}>
-                <div style={{fontSize:26,marginBottom:6}}>✓</div>
-                <div style={{fontFamily:"system-ui",fontSize:18,fontWeight:700,color:"#4ade80"}}>{fM3(r.m3)} m³</div>
-                <div style={{fontFamily:"system-ui",fontSize:12,color:"#64748b",marginTop:4}}>Saisi le {fDATE(r.enteredAt)}</div>
-                {a.totalBill&&total>0&&<div style={{fontFamily:"system-ui",fontSize:12,color:"#f59e0b",marginTop:8}}>Estimation : {fEUR((r.m3/total)*a.totalBill)}</div>}
-                <button onClick={()=>update({appels:(copro.appels||[]).map(x=>x.id!==a.id?x:{...x,releves:(x.releves||[]).filter(rv=>rv.ownerId!==user.id)})})}
-                  style={{marginTop:10,background:"none",border:"1px solid #1a3a5f",color:"#64748b",padding:"5px 14px",borderRadius:8,cursor:"pointer",fontFamily:"system-ui",fontSize:12}}>Modifier</button>
-              </div>
-            ):(
-              <FL label="Votre consommation (m³)">
-                <div style={{display:"flex",gap:10}}>
-                  <NIn value={vals[a.id]||""} onChange={v=>setVals(p=>({...p,[a.id]:v}))} placeholder="0.000" unit="m³"/>
-                  <Btn small disabled={!vals[a.id]||Number(vals[a.id])<=0} onClick={()=>submit(a.id,vals[a.id])}>Enregistrer</Btn>
-                </div>
-              </FL>
-            )}
+      <h2 style={S.h2}>🔢 Index des compteurs</h2>
+      <div style={{fontFamily:"system-ui",fontSize:13,color:"#64748b",marginBottom:20,lineHeight:1.7}}>
+        Définissez ou mettez à jour l'index de chaque propriétaire.<br/>
+        Cet index sert de base pour calculer la consommation lors du prochain relevé.
+      </div>
+      {!verified?(
+        <div style={{...S.card,border:"1px solid #f59e0b44",maxWidth:440}}>
+          <div style={{fontFamily:"system-ui",fontSize:14,fontWeight:700,color:"#f59e0b",marginBottom:6}}>🔒 Accès protégé</div>
+          <div style={{fontFamily:"system-ui",fontSize:12,color:"#64748b",marginBottom:16,lineHeight:1.6}}>
+            {adminPwd?"Entrez votre code admin (défini dans ⚙️ Paramètres) pour continuer.":"Entrez un code à 4 caractères minimum pour déverrouiller."}
           </div>
-        );
-      })}
+          <FL label="Code admin"><FI type="password" value={pwd} onChange={setPwd} placeholder="Votre code" onKey={e=>e.key==="Enter"&&verify()}/></FL>
+          {err&&<Err>{err}</Err>}
+          <Btn onClick={verify} full>🔓 Accéder aux compteurs</Btn>
+        </div>
+      ):(
+        <>
+          <div style={{background:"#14532d22",borderRadius:10,padding:"10px 14px",border:"1px solid #166834",marginBottom:20,fontFamily:"system-ui",fontSize:12,color:"#4ade80",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <span>✓ Accès autorisé — modification des index activée</span>
+            <button onClick={()=>{setVerified(false);setPwd("");}} style={{background:"none",border:"1px solid #166834",color:"#4ade80",padding:"4px 10px",borderRadius:6,cursor:"pointer",fontFamily:"system-ui",fontSize:11}}>🔒 Verrouiller</button>
+          </div>
+          {members.length===0?<Empty>Aucun membre.</Empty>:(
+            <>
+              <div style={{border:"1px solid #1a3a5f33",borderRadius:12,overflow:"hidden",marginBottom:16}}>
+                <div style={{display:"grid",gridTemplateColumns:"2fr 1.5fr 1.5fr",background:"#060c16",padding:"10px 16px",borderBottom:"1px solid #1a3a5f22"}}>
+                  {["Propriétaire","Index enregistré","Nouvel index (m³)"].map(h=><div key={h} style={{fontFamily:"system-ui",fontSize:11,fontWeight:700,color:"#334155",letterSpacing:1,textTransform:"uppercase"}}>{h}</div>)}
+                </div>
+                {members.map((m,i)=>(
+                  <div key={m.id} style={{display:"grid",gridTemplateColumns:"2fr 1.5fr 1.5fr",padding:"14px 16px",borderBottom:i<members.length-1?"1px solid #1a3a5f11":"none",background:i%2===0?"#0c1829":"#090f1d",alignItems:"center",gap:10}}>
+                    <div style={{display:"flex",alignItems:"center",gap:10}}>
+                      <Av name={m.name} idx={i} size={34}/>
+                      <div>
+                        <div style={{fontFamily:"system-ui",fontSize:13,fontWeight:600,color:"#e2e8f0"}}>{m.name}</div>
+                        <div style={{fontFamily:"system-ui",fontSize:11,color:"#475569"}}>{m.type==="proprietaire"?"🏠":"🔑"}</div>
+                      </div>
+                    </div>
+                    <div style={{textAlign:"center"}}>
+                      {m.lastIndex?<span style={{fontFamily:"system-ui",fontSize:15,fontWeight:700,color:"#38bdf8"}}>{Number(m.lastIndex).toFixed(3)} m³</span>
+                        :<span style={{fontFamily:"system-ui",fontSize:12,color:"#f59e0b"}}>⚠️ Non défini</span>}
+                      {(m.indexHistory||[]).length>0&&<div style={{fontFamily:"system-ui",fontSize:10,color:"#475569",marginTop:2}}>{(m.indexHistory||[]).length} modification{(m.indexHistory||[]).length>1?"s":""}</div>}
+                    </div>
+                    <div style={{position:"relative"}}>
+                      <input type="number" min="0" step="0.001" value={indexes[m.id]||""}
+                        onChange={e=>setIndexes(p=>({...p,[m.id]:e.target.value}))}
+                        placeholder={m.lastIndex?Number(m.lastIndex).toFixed(3):"ex: 1535.250"}
+                        style={{...S.inp,paddingRight:42,fontSize:14,fontWeight:600,borderColor:indexes[m.id]&&Number(indexes[m.id])>0?"#2563eb":"#1a3a5f"}}/>
+                      <span style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",color:"#38bdf8",fontFamily:"system-ui",fontSize:11,fontWeight:700}}>m³</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              {members.some(m=>indexes[m.id]&&indexes[m.id]!=="")&&(
+                <div style={{...S.card,border:"1px solid #2563eb44",marginBottom:16}}>
+                  <div style={{fontFamily:"system-ui",fontSize:13,fontWeight:700,color:"#60a5fa",marginBottom:10}}>📋 Récapitulatif</div>
+                  {members.filter(m=>indexes[m.id]&&indexes[m.id]!=="").map((m,i)=>(
+                    <div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",fontFamily:"system-ui",fontSize:13,marginBottom:6}}>
+                      <span style={{color:"#e2e8f0",fontWeight:600}}>{m.name}</span>
+                      <div style={{display:"flex",alignItems:"center",gap:10}}>
+                        {m.lastIndex&&<><span style={{color:"#64748b"}}>{Number(m.lastIndex).toFixed(3)}</span><span style={{color:"#475569"}}>→</span></>}
+                        <span style={{color:"#4ade80",fontWeight:700}}>{Number(indexes[m.id]).toFixed(3)} m³</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <Btn onClick={saveIndexes} full style={{background:"linear-gradient(135deg,#059669,#10b981)"}}>{saved?"✅ Enregistrés !":"💾 Enregistrer les index"}</Btn>
+            </>
+          )}
+        </>
+      )}
     </div>
   );
 }
 
-// ─── Caisse ───────────────────────────────────────────
+// ─── Caisse ────────────────────────────────────────────────
 function CaisseTab({ copro, balance, update }) {
-  const tIN =(copro.appels||[]).flatMap(a=>(a.payments||[]).filter(p=>p.paid)).reduce((s,p)=>s+Number(p.amount),0);
+  const tIN=(copro.appels||[]).flatMap(a=>(a.payments||[]).filter(p=>p.paid)).reduce((s,p)=>s+Number(p.amount),0);
   const tOUT=(copro.depenses||[]).reduce((s,d)=>s+Number(d.amount),0);
-  const pending=(copro.appels||[]).flatMap(a=>a.status!=="open"?(a.payments||[]).filter(p=>!p.paid).map(p=>({...p,appelTitle:a.title,appelId:a.id})):[]);
+  const pending=(copro.appels||[]).flatMap(a=>a.status!=="open"?(a.payments||[]).filter(p=>!p.paid&&Number(p.amount)>0).map(p=>({...p,appelTitle:a.title,appelId:a.id})):[]);
   const events=[
     ...(copro.appels||[]).flatMap(a=>(a.payments||[]).filter(p=>p.paid).map(p=>({date:p.paidDate,type:"in",label:`${p.ownerName} — ${a.title}`,amount:p.amount}))),
     ...(copro.depenses||[]).map(d=>({date:d.date,type:"out",label:d.label,amount:d.amount})),
-  ].sort((a,b)=>new Date(b.date)-new Date(a.date)).slice(0,15);
-
+  ].sort((a,b)=>new Date(b.date)-new Date(a.date)).slice(0,20);
   async function confirm_(appelId,ownerId) {
     const appels=(copro.appels||[]).map(a=>{
       if (a.id!==appelId) return a;
@@ -1764,16 +1202,14 @@ function CaisseTab({ copro, balance, update }) {
     });
     await update({appels});
   }
-
   return (
     <div>
       <h2 style={S.h2}>Caisse commune</h2>
       <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:12,marginBottom:22}}>
-        <KPI icon="📥" label="Entrées" val={fEUR(tIN)}  color="#4ade80"/>
+        <KPI icon="📥" label="Entrées" val={fEUR(tIN)} color="#4ade80"/>
         <KPI icon="📤" label="Sorties" val={fEUR(tOUT)} color="#f87171"/>
-        <KPI icon="💰" label="Solde"   val={fEUR(balance)} color={balance>=0?"#4ade80":"#f87171"}/>
+        <KPI icon="💰" label="Solde" val={fEUR(balance)} color={balance>=0?"#4ade80":"#f87171"}/>
       </div>
-
       {pending.length>0&&(
         <Sec title={`⏳ Virements à confirmer (${pending.length})`}>
           {pending.map((p,i)=>(
@@ -1790,7 +1226,6 @@ function CaisseTab({ copro, balance, update }) {
           ))}
         </Sec>
       )}
-
       <Sec title="📜 Historique">
         {!events.length?<Empty>Aucun mouvement.</Empty>:events.map((e,i)=>(
           <div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 14px",background:S.card.background,borderRadius:10,marginBottom:6,borderLeft:`3px solid ${e.type==="in"?"#4ade80":"#f87171"}`}}>
@@ -1806,37 +1241,26 @@ function CaisseTab({ copro, balance, update }) {
   );
 }
 
-// ─── Dépenses ─────────────────────────────────────────
+// ─── Dépenses ──────────────────────────────────────────────
 function DepensesTab({ copro, update }) {
-  const [show,setShow]=useState(false);
-  const [label,setLabel]=useState(""); const [amount,setAmount]=useState(""); const [cat,setCat]=useState("Eau");
-  const [date,setDate]=useState(TODAY()); const [note,setNote]=useState("");
+  const [show,setShow]=useState(false), [label,setLabel]=useState(""), [amount,setAmount]=useState(""), [cat,setCat]=useState("Eau"), [date,setDate]=useState(TODAY()), [note,setNote]=useState("");
   const CATS=["Eau","Assurance","Charges communes","Travaux","Autre"];
   const ICONS={Eau:"💧",Assurance:"🛡️","Charges communes":"🏢",Travaux:"🔧",Autre:"📁"};
-
   async function add() {
     if (!label.trim()||!amount) return;
     await update({depenses:[{id:uid(),label:label.trim(),amount:Number(amount),category:cat,date,note},...(copro.depenses||[])]});
     setLabel(""); setAmount(""); setNote(""); setShow(false);
   }
-
   const sorted=[...(copro.depenses||[])].sort((a,b)=>new Date(b.date)-new Date(a.date));
   const byCat=CATS.map(c=>({c,t:(copro.depenses||[]).filter(d=>d.category===c).reduce((s,d)=>s+Number(d.amount),0)})).filter(x=>x.t>0);
-
   return (
     <div>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
         <h2 style={S.h2}>Dépenses</h2>
-        <Btn small onClick={()=>setShow(!show)}>{show?"✕ Annuler":"+ Ajouter"}</Btn>
+        <Btn small onClick={()=>setShow(!show)}>{show?"✕":"+ Ajouter"}</Btn>
       </div>
       {byCat.length>0&&<div style={{display:"flex",gap:10,flexWrap:"wrap",marginBottom:18}}>
-        {byCat.map(({c,t})=>(
-          <div key={c} style={{background:S.card.background,borderRadius:10,padding:"10px 14px",border:"1px solid #1a3a5f"}}>
-            <div style={{fontSize:18}}>{ICONS[c]}</div>
-            <div style={{fontFamily:"system-ui",fontSize:11,color:"#64748b"}}>{c}</div>
-            <div style={{fontFamily:"system-ui",fontSize:14,fontWeight:700,color:"#f87171"}}>{fEUR(t)}</div>
-          </div>
-        ))}
+        {byCat.map(({c,t})=><div key={c} style={{...S.card,padding:"10px 14px"}}><div style={{fontSize:18}}>{ICONS[c]}</div><div style={{fontFamily:"system-ui",fontSize:11,color:"#64748b"}}>{c}</div><div style={{fontFamily:"system-ui",fontSize:14,fontWeight:700,color:"#f87171"}}>{fEUR(t)}</div></div>)}
       </div>}
       {show&&(
         <div style={S.card}>
@@ -1870,319 +1294,54 @@ function DepensesTab({ copro, update }) {
   );
 }
 
-// ─── Compteurs (syndic) ───────────────────────────────────
-function CompteursTab({ copro, update }) {
-  const members = (copro.users||[]).filter(u=>u.active && u.id!=="__admin__");
-  const [indexes, setIndexes] = useState(
-    Object.fromEntries(members.map(m=>[m.id, m.lastIndex||""]))
-  );
-  const [adminCode, setAdminCode] = useState("");
-  const [verified, setVerified] = useState(false);
-  const [err, setErr] = useState("");
-  const [saved, setSaved] = useState(false);
-
-  // Le code admin = mot de passe du syndic ou "admin"
-  function verifyCode() {
-    // On accepte le mot de passe admin de la copro (stocké en hash)
-    // Pour simplifier on utilise un code à 4 chiffres que le syndic fixe
-    if (adminCode.length >= 4) {
-      setVerified(true);
-      setErr("");
-    } else {
-      setErr("Code trop court (min. 4 caractères)");
-    }
-  }
-
-  async function saveIndexes() {
-    const users = (copro.users||[]).map(u => {
-      const newIdx = indexes[u.id];
-      if (newIdx !== undefined && newIdx !== "") {
-        return { ...u, lastIndex: Number(newIdx), indexHistory: [
-          ...(u.indexHistory||[]),
-          { index: Number(newIdx), date: new Date().toISOString(), setBy: "syndic" }
-        ]};
-      }
-      return u;
-    });
-    await update({ users });
-    setSaved(true);
-    setTimeout(()=>setSaved(false), 2500);
-  }
-
-  return (
-    <div>
-      <h2 style={S.h2}>🔢 Index des compteurs</h2>
-      <div style={{fontFamily:"system-ui",fontSize:13,color:"#64748b",marginBottom:20,lineHeight:1.7}}>
-        Définissez ou mettez à jour l'index de départ de chaque propriétaire.<br/>
-        Cet index sert de base pour calculer la consommation lors du prochain relevé.
-      </div>
-
-      {/* Vérification code admin */}
-      {!verified ? (
-        <div style={{...S.card,border:"1px solid #f59e0b44",maxWidth:420}}>
-          <div style={{fontFamily:"system-ui",fontSize:14,fontWeight:700,color:"#f59e0b",marginBottom:6}}>
-            🔒 Accès protégé
-          </div>
-          <div style={{fontFamily:"system-ui",fontSize:12,color:"#64748b",marginBottom:16,lineHeight:1.6}}>
-            La modification des index compteurs est protégée pour éviter toute fraude.<br/>
-            Entrez votre mot de passe syndic pour continuer.
-          </div>
-          <FL label="Votre mot de passe syndic">
-            <FI type="password" value={adminCode} onChange={setAdminCode}
-              placeholder="Votre mot de passe"
-              onKey={e=>e.key==="Enter"&&verifyCode()}/>
-          </FL>
-          {err && <Err>{err}</Err>}
-          <Btn onClick={verifyCode} full>🔓 Accéder aux compteurs</Btn>
-        </div>
-      ) : (
-        <>
-          <div style={{background:"#14532d22",borderRadius:10,padding:"10px 14px",border:"1px solid #166834",marginBottom:20,fontFamily:"system-ui",fontSize:12,color:"#4ade80",display:"flex",alignItems:"center",gap:8}}>
-            ✓ Accès autorisé — vous pouvez modifier les index
-          </div>
-
-          {members.length === 0 ? (
-            <Empty>Aucun membre dans cette copropriété.</Empty>
-          ) : (
-            <>
-              <div style={{border:"1px solid #1a3a5f33",borderRadius:12,overflow:"hidden",marginBottom:16}}>
-                {/* Header */}
-                <div style={{display:"grid",gridTemplateColumns:"2fr 1.5fr 1.5fr",background:"#060c16",padding:"10px 16px",borderBottom:"1px solid #1a3a5f22"}}>
-                  {["Propriétaire","Index actuel enregistré","Nouvel index (m³)"].map(h=>(
-                    <div key={h} style={{fontFamily:"system-ui",fontSize:11,fontWeight:700,color:"#334155",letterSpacing:1,textTransform:"uppercase"}}>{h}</div>
-                  ))}
-                </div>
-
-                {members.map((m,i)=>(
-                  <div key={m.id} style={{display:"grid",gridTemplateColumns:"2fr 1.5fr 1.5fr",padding:"14px 16px",borderBottom:i<members.length-1?"1px solid #1a3a5f11":"none",background:i%2===0?"#0c1829":"#090f1d",alignItems:"center",gap:10}}>
-                    {/* Nom */}
-                    <div style={{display:"flex",alignItems:"center",gap:10}}>
-                      <Av name={m.name} idx={i} size={34}/>
-                      <div>
-                        <div style={{fontFamily:"system-ui",fontSize:13,fontWeight:600,color:"#e2e8f0"}}>{m.name}</div>
-                        <div style={{fontFamily:"system-ui",fontSize:11,color:"#475569"}}>{m.type==="proprietaire"?"🏠":"🔑"} {m.type}</div>
-                      </div>
-                    </div>
-
-                    {/* Index actuel */}
-                    <div style={{textAlign:"center"}}>
-                      {m.lastIndex
-                        ? <span style={{fontFamily:"system-ui",fontSize:15,fontWeight:700,color:"#38bdf8"}}>{Number(m.lastIndex).toFixed(3)} m³</span>
-                        : <span style={{fontFamily:"system-ui",fontSize:12,color:"#f59e0b"}}>⚠️ Non défini</span>
-                      }
-                    </div>
-
-                    {/* Champ saisie nouvel index */}
-                    <div style={{position:"relative"}}>
-                      <input
-                        type="number" min="0" step="0.001"
-                        value={indexes[m.id]||""}
-                        onChange={e=>setIndexes(p=>({...p,[m.id]:e.target.value}))}
-                        placeholder={m.lastIndex ? Number(m.lastIndex).toFixed(3) : "ex: 1535.250"}
-                        style={{...S.inp,paddingRight:42,fontSize:14,fontWeight:600,
-                          borderColor: indexes[m.id] && Number(indexes[m.id])>0 ? "#2563eb" : "#1a3a5f"}}
-                      />
-                      <span style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",color:"#38bdf8",fontFamily:"system-ui",fontSize:11,fontWeight:700}}>m³</span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-
-              {/* Résumé des changements */}
-              {members.some(m=>indexes[m.id]&&indexes[m.id]!=="") && (
-                <div style={{...S.card,border:"1px solid #2563eb44",marginBottom:16}}>
-                  <div style={{fontFamily:"system-ui",fontSize:13,fontWeight:700,color:"#60a5fa",marginBottom:10}}>
-                    📋 Récapitulatif des modifications
-                  </div>
-                  {members.filter(m=>indexes[m.id]&&indexes[m.id]!=="").map((m,i)=>(
-                    <div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",fontFamily:"system-ui",fontSize:13,marginBottom:6}}>
-                      <span style={{color:"#e2e8f0",fontWeight:600}}>{m.name}</span>
-                      <div style={{display:"flex",alignItems:"center",gap:10}}>
-                        {m.lastIndex && <>
-                          <span style={{color:"#64748b"}}>{Number(m.lastIndex).toFixed(3)} m³</span>
-                          <span style={{color:"#475569"}}>→</span>
-                        </>}
-                        <span style={{color:"#4ade80",fontWeight:700}}>{Number(indexes[m.id]).toFixed(3)} m³</span>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              <Btn onClick={saveIndexes} full style={{background:"linear-gradient(135deg,#059669,#10b981)"}}>
-                {saved ? "✅ Index enregistrés !" : "💾 Enregistrer les index"}
-              </Btn>
-            </>
-          )}
-        </>
-      )}
-    </div>
-  );
-}
-
-// ─── Paramètres copro ─────────────────────────────────
-// ─── Gestionnaire d'index (admin) ────────────────────────
-function IndexManager({ copro, adminPin, onUpdate }) {
-  const [pinInput, setPinInput] = useState("");
-  const [unlocked, setUnlocked] = useState(false);
-  const [indexes, setIndexes] = useState(() => {
-    const obj = {};
-    (copro.users||[]).forEach(u => { obj[u.id] = u.lastIndex || ""; });
-    return obj;
-  });
-  const [saved, setSaved] = useState(false);
-
-  function unlock() {
-    if (!adminPin) { setUnlocked(true); return; } // no PIN set yet
-    if (pinInput === adminPin) { setUnlocked(true); setPinInput(""); }
-    else { alert("Code PIN incorrect."); setPinInput(""); }
-  }
-
-  async function saveIndexes() {
-    const users = (copro.users||[]).map(u => ({
-      ...u,
-      lastIndex: indexes[u.id] ? Number(indexes[u.id]) : u.lastIndex
-    }));
-    await onUpdate({ users });
-    setSaved(true);
-    setTimeout(() => setSaved(false), 2000);
-  }
-
-  const members = (copro.users||[]).filter(u => u.role !== "admin");
-
-  if (!unlocked) return (
-    <div>
-      {members.map((u,i) => (
-        <div key={i} style={{display:"flex",justifyContent:"space-between",fontFamily:"system-ui",fontSize:13,color:"#64748b",marginBottom:8,padding:"8px 0",borderBottom:"1px solid #1a3a5f22"}}>
-          <span style={{color:"#e2e8f0"}}>{u.name}</span>
-          <span style={{color:"#38bdf8"}}>{u.lastIndex ? fM3(u.lastIndex)+" m³" : <span style={{color:"#f59e0b"}}>Non défini</span>}</span>
-        </div>
-      ))}
-      {adminPin ? (
-        <div style={{display:"flex",gap:10,marginTop:12}}>
-          <div style={{position:"relative",flex:1}}>
-            <input type="password" value={pinInput} onChange={e=>setPinInput(e.target.value)}
-              onKeyDown={e=>e.key==="Enter"&&unlock()}
-              placeholder="Code PIN admin pour modifier"
-              style={{...S.inp,paddingRight:36}}/>
-          </div>
-          <button onClick={unlock} style={{padding:"0 16px",borderRadius:9,border:"none",background:"#1d4ed8",color:"#fff",fontFamily:"system-ui",fontSize:13,fontWeight:700,cursor:"pointer"}}>
-            🔓 Déverrouiller
-          </button>
-        </div>
-      ) : (
-        <div style={{fontFamily:"system-ui",fontSize:11,color:"#f59e0b",marginTop:8}}>
-          ⚠️ Définissez un code PIN admin ci-dessus pour protéger les index.
-        </div>
-      )}
-    </div>
-  );
-
-  return (
-    <div>
-      <div style={{fontFamily:"system-ui",fontSize:12,color:"#4ade80",marginBottom:14}}>🔓 Mode modification activé</div>
-      {members.map((u,i) => (
-        <div key={i} style={{display:"flex",alignItems:"center",gap:10,marginBottom:10}}>
-          <span style={{fontFamily:"system-ui",fontSize:13,fontWeight:600,color:"#e2e8f0",width:120,flexShrink:0}}>{u.name}</span>
-          <div style={{position:"relative",flex:1}}>
-            <input type="number" min="0" step="0.001"
-              value={indexes[u.id]||""}
-              onChange={e=>setIndexes(p=>({...p,[u.id]:e.target.value}))}
-              placeholder="Index en m³" style={{...S.inp,paddingRight:42}}/>
-            <span style={{position:"absolute",right:12,top:"50%",transform:"translateY(-50%)",color:"#38bdf8",fontFamily:"system-ui",fontSize:12,fontWeight:700}}>m³</span>
-          </div>
-        </div>
-      ))}
-      <div style={{display:"flex",gap:10,marginTop:4}}>
-        <button onClick={()=>setUnlocked(false)} style={{padding:"8px 16px",borderRadius:9,border:"1px solid #1a3a5f",background:"transparent",color:"#64748b",fontFamily:"system-ui",fontSize:13,cursor:"pointer"}}>
-          🔒 Verrouiller
-        </button>
-        <button onClick={saveIndexes} style={{flex:1,padding:"10px",borderRadius:9,border:"none",background:"linear-gradient(135deg,#059669,#10b981)",color:"#fff",fontFamily:"system-ui",fontSize:13,fontWeight:700,cursor:"pointer"}}>
-          {saved ? "✓ Index sauvegardés !" : "Enregistrer les index"}
-        </button>
-      </div>
-    </div>
-  );
-}
-
+// ─── Paramètres ────────────────────────────────────────────
 function ParamsTab({ copro, update }) {
-  const [form,setForm]=useState({iban:copro.iban||"",refPriceM3:copro.refPriceM3||"",assuranceAnnuelle:copro.assuranceAnnuelle||"",adminPin:""});
-  const [ok,setOk]=useState(false);
-  const [fetchSt,setFetchSt]=useState("idle");
-  const [fetchR,setFetchR]=useState(null);
-
+  const [form,setForm]=useState({iban:copro.iban||"",refPriceM3:copro.refPriceM3||"",assuranceAnnuelle:copro.assuranceAnnuelle||"",adminPin:copro.adminPin||""});
+  const [ok,setOk]=useState(false), [fetchSt,setFetchSt]=useState("idle"), [fetchR,setFetchR]=useState(null);
   async function autoFetch() {
     setFetchSt("loading"); setFetchR(null);
     try {
-      const res=await fetch("https://api.anthropic.com/v1/messages",{
-        method:"POST",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({
-          model:"claude-sonnet-4-20250514",max_tokens:512,
-          tools:[{type:"web_search_20250305",name:"web_search"}],
-          system:`Prix m³ eau TTC Marseille SEM 2025. JSON uniquement: {"prix_m3":<float>,"source":"<string>","annee":<int>}`,
-          messages:[{role:"user",content:"Prix m³ eau potable TTC Marseille 2025 Eaux de Marseille. JSON."}]
-        })
-      });
+      const res=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:512,tools:[{type:"web_search_20250305",name:"web_search"}],
+          system:`Prix m³ eau TTC Marseille 2025. JSON uniquement: {"prix_m3":<float>,"source":"<string>","annee":<int>}`,
+          messages:[{role:"user",content:"Prix m³ eau potable TTC Marseille 2025. JSON."}]})});
       const data=await res.json();
       const text=(data.content||[]).filter(b=>b.type==="text").map(b=>b.text).join("");
       const m=text.match(/\{[^{}]+\}/);
-      if (m) {
-        const r=JSON.parse(m[0]);
-        if (r.prix_m3) { setForm(p=>({...p,refPriceM3:String(r.prix_m3)})); setFetchR(r); setFetchSt("ok"); }
-        else { setFetchSt("error"); }
-      } else setFetchSt("error");
+      if (m) { const r=JSON.parse(m[0]); if(r.prix_m3){setForm(p=>({...p,refPriceM3:String(r.prix_m3)}));setFetchR(r);setFetchSt("ok");}else setFetchSt("error"); }
+      else setFetchSt("error");
     } catch { setFetchSt("error"); }
   }
-
   async function saveParams() {
-    await update({iban:form.iban,refPriceM3:form.refPriceM3,assuranceAnnuelle:form.assuranceAnnuelle,adminPin:form.adminPin||copro.adminPin||""});
+    await update({iban:form.iban,refPriceM3:form.refPriceM3,assuranceAnnuelle:form.assuranceAnnuelle,adminPin:form.adminPin});
     setOk(true); setTimeout(()=>setOk(false),2000);
   }
-
   return (
     <div style={{maxWidth:520}}>
       <h2 style={S.h2}>Paramètres</h2>
       <div style={S.card}>
-        <div style={{fontFamily:"system-ui",fontSize:13,fontWeight:700,color:"#4ade80",marginBottom:10}}>🏦 Compte bancaire</div>
+        <div style={{fontFamily:"system-ui",fontSize:13,fontWeight:700,color:"#4ade80",marginBottom:10}}>🏦 Coordonnées bancaires</div>
         <div style={{fontFamily:"system-ui",fontSize:12,color:"#475569",marginBottom:12}}>Affiché aux membres pour leurs virements.</div>
-        <textarea value={form.iban} onChange={e=>setForm(p=>({...p,iban:e.target.value}))}
-          placeholder={"FR76 XXXX XXXX XXXX XXXX XXXX XXX\nTitulaire : …"} style={{...S.inp,height:68,resize:"vertical"}}/>
+        <textarea value={form.iban} onChange={e=>setForm(p=>({...p,iban:e.target.value}))} placeholder={"FR76 XXXX XXXX XXXX XXXX XXXX XXX\nTitulaire : …"} style={{...S.inp,height:68,resize:"vertical"}}/>
       </div>
-
       <div style={S.card}>
         <div style={{fontFamily:"system-ui",fontSize:13,fontWeight:700,color:"#f59e0b",marginBottom:6}}>🔐 Code admin — Protection des index</div>
         <div style={{fontFamily:"system-ui",fontSize:12,color:"#475569",marginBottom:12,lineHeight:1.6}}>
-          Ce code est requis pour modifier l'index précédent d'un propriétaire.<br/>
-          <span style={{color:"#f59e0b"}}>Les propriétaires ne peuvent PAS modifier leur propre index précédent.</span>
+          Requis pour modifier les index dans l'onglet 🔢 Compteurs.<br/>
+          <span style={{color:"#f59e0b"}}>Si vide, tout code de 4 caractères est accepté.</span>
         </div>
-        <div style={{position:"relative"}}>
-          <input type="password" value={form.adminPin||""} onChange={e=>setForm(p=>({...p,adminPin:e.target.value}))}
-            placeholder="Code PIN admin (min. 4 chiffres)" style={{...S.inp,paddingRight:36}}/>
-        </div>
-        {form.adminPin&&form.adminPin.length>=4&&<div style={{fontFamily:"system-ui",fontSize:11,color:"#4ade80",marginTop:6}}>✓ Code PIN défini</div>}
-      </div>
-
-      <div style={S.card}>
-        <div style={{fontFamily:"system-ui",fontSize:13,fontWeight:700,color:"#38bdf8",marginBottom:10}}>📊 Index initiaux des propriétaires</div>
-        <div style={{fontFamily:"system-ui",fontSize:12,color:"#475569",marginBottom:14,lineHeight:1.6}}>
-          Définissez l'index de départ de chaque propriétaire (votre base existante).<br/>
-          <span style={{color:"#f59e0b"}}>Modifiable uniquement avec le code admin.</span>
-        </div>
-        <IndexManager copro={copro} adminPin={form.adminPin||copro.adminPin||""} onUpdate={update}/>
+        <FI type="password" value={form.adminPin||""} onChange={v=>setForm(p=>({...p,adminPin:v}))} placeholder="Code PIN (min. 4 caractères)"/>
+        {form.adminPin&&form.adminPin.length>=4&&<div style={{fontFamily:"system-ui",fontSize:11,color:"#4ade80",marginTop:6}}>✓ Code défini</div>}
       </div>
       <div style={S.card}>
         <div style={{fontFamily:"system-ui",fontSize:13,fontWeight:700,color:"#38bdf8",marginBottom:6}}>💧 Tarif Eaux de Marseille</div>
-        <div style={{fontFamily:"system-ui",fontSize:12,color:"#475569",marginBottom:12,lineHeight:1.6}}>
-          Prix m³ TTC → les m³ se calculent <strong style={{color:"#4ade80"}}>automatiquement</strong> dès que vous saisissez le montant TTC.
-        </div>
+        <div style={{fontFamily:"system-ui",fontSize:12,color:"#475569",marginBottom:12,lineHeight:1.6}}>Prix m³ TTC → les m³ se calculent automatiquement dès que vous saisissez le montant TTC.</div>
         <div style={{display:"flex",gap:10,marginBottom:10}}>
           <NIn value={form.refPriceM3} onChange={v=>setForm(p=>({...p,refPriceM3:v}))} placeholder="ex: 3.78500" unit="€/m³"/>
-          <button onClick={autoFetch} disabled={fetchSt==="loading"} style={{padding:"0 14px",borderRadius:10,border:"1px solid #1a3a5f",background:S.card.background,color:"#60a5fa",fontFamily:"system-ui",fontSize:13,fontWeight:600,cursor:"pointer",whiteSpace:"nowrap"}}>
-            {fetchSt==="loading"?"⏳…":"🤖 Auto-fetch"}
-          </button>
+          <button onClick={autoFetch} disabled={fetchSt==="loading"} style={{padding:"0 14px",borderRadius:10,border:"1px solid #1a3a5f",background:S.card.background,color:"#60a5fa",fontFamily:"system-ui",fontSize:13,fontWeight:600,cursor:"pointer",whiteSpace:"nowrap"}}>{fetchSt==="loading"?"⏳…":"🤖 Auto-fetch"}</button>
         </div>
         {fetchSt==="ok"&&fetchR&&<div style={{fontFamily:"system-ui",fontSize:12,color:"#4ade80",marginBottom:8}}>✓ {fetchR.prix_m3} €/m³ ({fetchR.annee})</div>}
-        {fetchSt==="error"&&<div style={{fontFamily:"system-ui",fontSize:12,color:"#fca5a5",marginBottom:8}}>Non trouvé. Saisissez manuellement depuis votre facture.</div>}
+        {fetchSt==="error"&&<div style={{fontFamily:"system-ui",fontSize:12,color:"#fca5a5",marginBottom:8}}>Non trouvé. Saisissez manuellement.</div>}
         {form.refPriceM3&&Number(form.refPriceM3)>0&&<div style={{fontFamily:"system-ui",fontSize:12,color:"#64748b"}}>Ex: 200 € TTC = <strong style={{color:"#38bdf8"}}>{(200/Number(form.refPriceM3)).toFixed(3)} m³</strong></div>}
       </div>
       <div style={S.card}>
@@ -2190,7 +1349,7 @@ function ParamsTab({ copro, update }) {
         <div style={{fontFamily:"system-ui",fontSize:12,color:"#475569",marginBottom:12}}>Cotisation annuelle — répartie à parts égales.</div>
         <NIn value={form.assuranceAnnuelle} onChange={v=>setForm(p=>({...p,assuranceAnnuelle:v}))} placeholder="ex: 480.00" unit="€"/>
       </div>
-      <Btn onClick={saveParams} full>{ok?"✓ Sauvegardé !":"Enregistrer les paramètres"}</Btn>
+      <Btn onClick={saveParams} full>{ok?"✓ Sauvegardé !":"Enregistrer"}</Btn>
     </div>
   );
 }
@@ -2198,115 +1357,64 @@ function ParamsTab({ copro, update }) {
 // ═══════════════════════════════════════════════════════
 //  MICRO COMPOSANTS
 // ═══════════════════════════════════════════════════════
-const FL  = ({label,children}) => <div style={{marginBottom:14}}><label style={S.lbl}>{label}</label>{children}</div>;
-const FI  = ({value,onChange,placeholder,type="text",onKey,autoFocus}) => (
-  <input type={type} value={value} onChange={e=>onChange(e.target.value)} placeholder={placeholder}
-    onKeyDown={onKey} autoFocus={autoFocus} autoComplete="off" style={S.inp}/>
+const FL  = ({label,children})=><div style={{marginBottom:14}}><label style={S.lbl}>{label}</label>{children}</div>;
+const FI  = ({value,onChange,placeholder,type="text",onKey,autoFocus})=><input type={type} value={value} onChange={e=>onChange(e.target.value)} placeholder={placeholder} onKeyDown={onKey} autoFocus={autoFocus} autoComplete="off" style={S.inp}/>;
+const NIn = ({value,onChange,placeholder,unit})=>(
+  <div style={{position:"relative"}}><input type="number" min="0" step="any" value={value} onChange={e=>onChange(e.target.value)} placeholder={placeholder} style={{...S.inp,paddingRight:unit.length>1?54:38}}/><span style={{position:"absolute",right:12,top:"50%",transform:"translateY(-50%)",color:unit==="m³"?"#38bdf8":"#64748b",fontFamily:"system-ui",fontSize:12,fontWeight:700}}>{unit}</span></div>
 );
-const NIn = ({value,onChange,placeholder,unit}) => (
-  <div style={{position:"relative"}}>
-    <input type="number" min="0" step="any" value={value} onChange={e=>onChange(e.target.value)}
-      placeholder={placeholder} style={{...S.inp,paddingRight:unit.length>1?54:38}}/>
-    <span style={{position:"absolute",right:12,top:"50%",transform:"translateY(-50%)",color:unit==="m³"?"#38bdf8":"#64748b",fontFamily:"system-ui",fontSize:12,fontWeight:700}}>{unit}</span>
-  </div>
-);
-const Btn = ({children,onClick,disabled,small,full,style={}}) => (
-  <button onClick={onClick} disabled={disabled} style={{padding:small?"8px 16px":"11px 22px",borderRadius:10,border:"none",background:disabled?"#1e3a5f":"linear-gradient(135deg,#1d4ed8,#3b82f6)",color:disabled?"#475569":"#fff",fontSize:small?13:14,fontWeight:700,cursor:disabled?"not-allowed":"pointer",fontFamily:"system-ui",width:full?"100%":undefined,...style}}>
-    {children}
-  </button>
-);
-const SecBtn = ({children,onClick}) => <button onClick={onClick} style={{padding:"11px 20px",borderRadius:10,border:"1px solid #1a3a5f",background:"#0a1628",color:"#94a3b8",fontSize:14,fontWeight:600,cursor:"pointer",fontFamily:"system-ui"}}>{children}</button>;
-const SmBtn  = ({children,onClick,danger}) => <button onClick={onClick} style={{padding:"6px 12px",borderRadius:8,border:`1px solid ${danger?"#7f1d1d":"#1a3a5f"}`,background:danger?"#7f1d1d22":"transparent",color:danger?"#fca5a5":"#94a3b8",fontSize:12,fontWeight:600,cursor:"pointer",fontFamily:"system-ui"}}>{children}</button>;
-const IBtn   = ({children,onClick,title,danger}) => <button onClick={onClick} title={title} style={{padding:"5px 8px",borderRadius:7,border:"none",background:"transparent",cursor:"pointer",fontSize:14,color:danger?"#f87171":"#64748b"}}>{children}</button>;
-const Err    = ({children}) => <div style={{background:"#450a0a",borderRadius:9,padding:"9px 13px",border:"1px solid #7f1d1d",fontFamily:"system-ui",fontSize:13,color:"#fca5a5",marginBottom:14}}>⚠️ {children}</div>;
-const Empty  = ({children}) => <div style={{textAlign:"center",color:"#334155",fontFamily:"system-ui",padding:"40px 20px",fontSize:14,lineHeight:1.8}}>{children}</div>;
-const Av     = ({name,idx,size=40}) => <div style={{width:size,height:size,borderRadius:"50%",background:`hsl(${(idx*137)%360},40%,30%)`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:size*0.42,fontWeight:700,flexShrink:0,color:"#fff",fontFamily:"system-ui"}}>{name[0].toUpperCase()}</div>;
-const Tag    = ({color,children}) => <span style={{fontFamily:"system-ui",fontSize:11,color,background:color+"22",padding:"2px 9px",borderRadius:20,fontWeight:600}}>{children}</span>;
-const KPI    = ({icon,label,val,color}) => <div style={{...S.card,textAlign:"center",padding:"14px"}}><div style={{fontSize:22,marginBottom:4}}>{icon}</div><div style={{fontFamily:"Georgia,serif",fontSize:22,fontWeight:700,color}}>{val}</div><div style={{fontFamily:"system-ui",fontSize:11,color:"#475569",marginTop:2}}>{label}</div></div>;
-const MK     = ({label,val,color}) => <div style={{background:"#060c16",borderRadius:10,padding:"10px",textAlign:"center"}}><div style={{fontFamily:"system-ui",fontSize:10,color:"#475569",textTransform:"uppercase",letterSpacing:1,marginBottom:4}}>{label}</div><div style={{fontFamily:"Georgia,serif",fontSize:16,fontWeight:700,color}}>{val}</div></div>;
-const Sec    = ({title,children}) => <div style={{marginBottom:22}}><div style={{fontSize:11,fontFamily:"system-ui",fontWeight:700,color:"#334155",letterSpacing:1.5,textTransform:"uppercase",marginBottom:10}}>{title}</div>{children}</div>;
-const SBadge = ({status}) => { const m={open:["#f59e0b","En attente"],active:["#60a5fa","En cours"],complete:["#4ade80","Complet"]}; const [c,l]=m[status]||["#64748b","?"]; return <span style={{fontFamily:"system-ui",fontSize:11,color:c,background:c+"22",padding:"2px 8px",borderRadius:20,display:"inline-block",marginTop:3}}>{l}</span>; };
+const Btn     = ({children,onClick,disabled,small,full,style={}})=><button onClick={onClick} disabled={disabled} style={{padding:small?"8px 16px":"11px 22px",borderRadius:10,border:"none",background:disabled?"#1e3a5f":"linear-gradient(135deg,#1d4ed8,#3b82f6)",color:disabled?"#475569":"#fff",fontSize:small?13:14,fontWeight:700,cursor:disabled?"not-allowed":"pointer",fontFamily:"system-ui",width:full?"100%":undefined,...style}}>{children}</button>;
+const SecBtn  = ({children,onClick})=><button onClick={onClick} style={{padding:"11px 20px",borderRadius:10,border:"1px solid #1a3a5f",background:"#0a1628",color:"#94a3b8",fontSize:14,fontWeight:600,cursor:"pointer",fontFamily:"system-ui"}}>{children}</button>;
+const SmBtn   = ({children,onClick,danger})=><button onClick={onClick} style={{padding:"6px 12px",borderRadius:8,border:`1px solid ${danger?"#7f1d1d":"#1a3a5f"}`,background:danger?"#7f1d1d22":"transparent",color:danger?"#fca5a5":"#94a3b8",fontSize:12,fontWeight:600,cursor:"pointer",fontFamily:"system-ui"}}>{children}</button>;
+const IBtn    = ({children,onClick,title,danger})=><button onClick={onClick} title={title} style={{padding:"5px 8px",borderRadius:7,border:"none",background:"transparent",cursor:"pointer",fontSize:14,color:danger?"#f87171":"#64748b"}}>{children}</button>;
+const Err     = ({children})=><div style={{background:"#450a0a",borderRadius:9,padding:"9px 13px",border:"1px solid #7f1d1d",fontFamily:"system-ui",fontSize:13,color:"#fca5a5",marginBottom:14}}>⚠️ {children}</div>;
+const Empty   = ({children})=><div style={{textAlign:"center",color:"#334155",fontFamily:"system-ui",padding:"40px 20px",fontSize:14,lineHeight:1.8}}>{children}</div>;
+const Av      = ({name,idx,size=40})=><div style={{width:size,height:size,borderRadius:"50%",background:`hsl(${(idx*137)%360},40%,30%)`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:size*0.42,fontWeight:700,flexShrink:0,color:"#fff",fontFamily:"system-ui"}}>{name[0].toUpperCase()}</div>;
+const Tag     = ({color,children})=><span style={{fontFamily:"system-ui",fontSize:11,color,background:color+"22",padding:"2px 9px",borderRadius:20,fontWeight:600}}>{children}</span>;
+const KPI     = ({icon,label,val,color})=><div style={{...S.card,textAlign:"center",padding:"14px"}}><div style={{fontSize:22,marginBottom:4}}>{icon}</div><div style={{fontFamily:"Georgia,serif",fontSize:22,fontWeight:700,color}}>{val}</div><div style={{fontFamily:"system-ui",fontSize:11,color:"#475569",marginTop:2}}>{label}</div></div>;
+const MK      = ({label,val,color})=><div style={{background:"#060c16",borderRadius:10,padding:"10px",textAlign:"center"}}><div style={{fontFamily:"system-ui",fontSize:10,color:"#475569",textTransform:"uppercase",letterSpacing:1,marginBottom:4}}>{label}</div><div style={{fontFamily:"Georgia,serif",fontSize:16,fontWeight:700,color}}>{val}</div></div>;
+const Sec     = ({title,children})=><div style={{marginBottom:22}}><div style={{fontSize:11,fontFamily:"system-ui",fontWeight:700,color:"#334155",letterSpacing:1.5,textTransform:"uppercase",marginBottom:10}}>{title}</div>{children}</div>;
+const SBadge  = ({status})=>{ const m={open:["#f59e0b","En attente"],active:["#60a5fa","En cours"],complete:["#4ade80","Complet"]}; const [c,l]=m[status]||["#64748b","?"]; return <span style={{fontFamily:"system-ui",fontSize:11,color:c,background:c+"22",padding:"2px 8px",borderRadius:20,display:"inline-block",marginTop:3}}>{l}</span>; };
 
-// ─── DataStatusBar ────────────────────────────────────
+// ─── DataStatusBar ─────────────────────────────────────────
 function DataStatusBar({ lastSaved, db, onExport }) {
-  const [age, setAge] = useState(0);
-  const [lsOk, setLsOk] = useState(false);
-
-  useEffect(() => {
-    try {
-      const raw = localStorage.getItem(LS_PRIMARY);
-      if (raw) { const d=JSON.parse(raw); setLsOk(d?.superAdmin!=null); }
-    } catch {}
-  }, [lastSaved]);
-
-  useEffect(() => {
-    if (!lastSaved) return;
-    const t = setInterval(() => setAge(Math.round((Date.now()-lastSaved)/1000)), 3000);
-    return () => clearInterval(t);
-  }, [lastSaved]);
-
-  const nb_copros = db?.copros?.length || 0;
-  const nb_users  = db?.copros?.reduce((s,c)=>s+(c.users||[]).length,0) || 0;
-  const nb_appels = db?.copros?.reduce((s,c)=>s+(c.appels||[]).length,0) || 0;
-
+  const [age,setAge]=useState(0), [lsOk,setLsOk]=useState(false);
+  useEffect(()=>{ try { const r=localStorage.getItem(LS_KEY); if(r){const d=JSON.parse(r);setLsOk(d?.superAdmin!=null);} } catch {} }, [lastSaved]);
+  useEffect(()=>{ if(!lastSaved) return; const t=setInterval(()=>setAge(Math.round((Date.now()-lastSaved)/1000)),3000); return ()=>clearInterval(t); },[lastSaved]);
+  const nb_c=db?.copros?.length||0, nb_u=db?.copros?.reduce((s,c)=>s+(c.users||[]).length,0)||0, nb_a=db?.copros?.reduce((s,c)=>s+(c.appels||[]).length,0)||0;
   return (
     <div style={{background:"#060c16",borderBottom:"1px solid #1a3a5f22",padding:"6px 22px",display:"flex",alignItems:"center",gap:16,flexWrap:"wrap"}}>
-      {/* Statut local */}
       <div style={{display:"flex",alignItems:"center",gap:6,fontFamily:"system-ui",fontSize:11}}>
         <span style={{width:7,height:7,borderRadius:"50%",background:lsOk?"#4ade80":"#f87171",display:"inline-block"}}/>
-        <span style={{color:lsOk?"#4ade80":"#f87171",fontWeight:700}}>
-          {lsOk?"Local sécurisé":"⚠️ Vérification…"}
-        </span>
+        <span style={{color:lsOk?"#4ade80":"#f87171",fontWeight:700}}>{lsOk?"Local sécurisé":"⚠️ Vérification…"}</span>
         {lastSaved&&<span style={{color:"#334155"}}>· {age<5?"à l'instant":age<60?`il y a ${age}s`:`il y a ${Math.round(age/60)}min`}</span>}
       </div>
-
-      {/* Statut Firebase */}
       <div style={{display:"flex",alignItems:"center",gap:6,fontFamily:"system-ui",fontSize:11}}>
         <span style={{width:7,height:7,borderRadius:"50%",background:"#60a5fa",display:"inline-block",animation:"pulse 2s infinite"}}/>
-        <span style={{color:"#60a5fa",fontWeight:700}}>☁️ Sync Firebase active</span>
+        <span style={{color:"#60a5fa",fontWeight:700}}>☁️ Firebase actif</span>
         <style>{`@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}`}</style>
       </div>
-
-      {/* Résumé */}
       <div style={{display:"flex",gap:12,fontFamily:"system-ui",fontSize:11,color:"#334155"}}>
-        <span>🏢 {nb_copros} copro{nb_copros!==1?"s":""}</span>
-        <span>👥 {nb_users} user{nb_users!==1?"s":""}</span>
-        <span>📢 {nb_appels} appel{nb_appels!==1?"s":""}</span>
+        <span>🏢 {nb_c}</span><span>👥 {nb_u}</span><span>📢 {nb_a}</span>
       </div>
-
-      <button onClick={onExport} style={{marginLeft:"auto",background:"none",border:"1px solid #1a3a5f",color:"#475569",padding:"3px 10px",borderRadius:6,cursor:"pointer",fontFamily:"system-ui",fontSize:11}}>
-        ↓ Copie locale (.json)
-      </button>
+      <button onClick={onExport} style={{marginLeft:"auto",background:"none",border:"1px solid #1a3a5f",color:"#475569",padding:"3px 10px",borderRadius:6,cursor:"pointer",fontFamily:"system-ui",fontSize:11}}>↓ Export .json</button>
     </div>
   );
 }
 
-// ─── SaveBadge ────────────────────────────────────────
+// ─── SaveBadge ─────────────────────────────────────────────
 function SaveBadge({ lastSaved }) {
-  const [label, setLabel] = useState("✅ Sauvegardé");
-  useEffect(() => {
+  const [label,setLabel]=useState("✅ Sauvegardé");
+  useEffect(()=>{
     if (!lastSaved) return;
-    function update() {
-      const diff = Math.round((Date.now() - lastSaved) / 1000);
-      if (diff < 5)        setLabel("✅ Sauvegardé à l'instant");
-      else if (diff < 60)  setLabel(`✅ Sauvegardé il y a ${diff}s`);
-      else if (diff < 120) setLabel("✅ Sauvegardé il y a 1 min");
-      else                 setLabel(`✅ Sauvegardé il y a ${Math.round(diff/60)} min`);
-    }
-    update();
-    const t = setInterval(update, 5000);
-    return () => clearInterval(t);
-  }, [lastSaved]);
+    function upd() { const d=Math.round((Date.now()-lastSaved)/1000); setLabel(d<5?"✅ À l'instant":d<60?`✅ il y a ${d}s`:`✅ il y a ${Math.round(d/60)}min`); }
+    upd(); const t=setInterval(upd,5000); return ()=>clearInterval(t);
+  },[lastSaved]);
   if (!lastSaved) return null;
-  return (
-    <span style={{fontFamily:"system-ui",fontSize:11,color:"#4ade80",background:"#14532d33",padding:"4px 10px",borderRadius:20,whiteSpace:"nowrap"}}>
-      {label}
-    </span>
-  );
+  return <span style={{fontFamily:"system-ui",fontSize:11,color:"#4ade80",background:"#14532d33",padding:"4px 10px",borderRadius:20,whiteSpace:"nowrap"}}>{label}</span>;
 }
 
-// ─── Design tokens ────────────────────────────────────
-const S = {
+// ─── Design tokens ─────────────────────────────────────────
+const S={
   root:   {minHeight:"100vh",background:"#07090f",color:"#e2e8f0"},
   header: {background:"linear-gradient(135deg,#0d1e38,#09121f)",borderBottom:"1px solid #1a3a5f33",padding:"14px 22px",display:"flex",justifyContent:"space-between",alignItems:"center"},
   eyebrow:{fontSize:10,letterSpacing:4,color:"#3b82f6",textTransform:"uppercase",fontFamily:"system-ui",fontWeight:700},
@@ -2322,10 +1430,6 @@ const S = {
 };
 
     ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
-    setTimeout(()=>{
-      document.getElementById("splash").style.display="none";
-      document.getElementById("root").style.display="block";
-    },500);
   </script>
 </body>
 </html>
