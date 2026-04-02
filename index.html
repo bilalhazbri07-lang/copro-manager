@@ -736,9 +736,20 @@ function Dashboard({ copro, user, isSyndic, balance, members, update }) {
                         await update({appels});
                       }}/>
                   ):(
-                    <div style={{background:"#1d4ed822",borderRadius:9,padding:"12px",border:"1px solid #2563eb44",textAlign:"center"}}>
+                    <div style={{background:"#1d4ed822",borderRadius:9,padding:"12px",border:"1px solid #2563eb44"}}>
                       <div style={{fontFamily:"system-ui",fontSize:14,fontWeight:700,color:"#60a5fa",marginBottom:4}}>✓ Virement signalé au syndic</div>
-                      <div style={{fontFamily:"system-ui",fontSize:12,color:"#475569"}}>En attente de confirmation — vous serez marqué "payé" dès réception.</div>
+                      <div style={{fontFamily:"system-ui",fontSize:12,color:"#475569",marginBottom:10}}>En attente de confirmation — vous serez marqué "payé" dès réception.</div>
+                      <button onClick={async()=>{
+                        const appels=(copro.appels||[]).map(a=>{
+                          const payments=(a.payments||[]).map(px=>
+                            (px.owner===user.id&&px.signaled)?{...px,signaled:false,signaledAt:null}:px
+                          );
+                          return {...a,payments};
+                        });
+                        await update({appels});
+                      }} style={{background:"none",border:"1px solid #1a3a5f",color:"#f87171",padding:"5px 14px",borderRadius:8,cursor:"pointer",fontFamily:"system-ui",fontSize:12}}>
+                        ✕ Annuler le signalement
+                      </button>
                     </div>
                   )}
                 </div>
@@ -961,9 +972,21 @@ function InlineReleveForm({ appels, user, copro, update }) {
                   // Vérifier si déjà signalé
                   const alreadySignaled = (a.payments||[]).find(px=>px.owner===user.id&&px.signaled);
                   return alreadySignaled ? (
-                    <div style={{background:"#1d4ed822",borderRadius:9,padding:"12px",border:"1px solid #2563eb44",textAlign:"center",marginBottom:12}}>
+                    <div style={{background:"#1d4ed822",borderRadius:9,padding:"12px",border:"1px solid #2563eb44",marginBottom:12}}>
                       <div style={{fontFamily:"system-ui",fontSize:14,fontWeight:700,color:"#60a5fa",marginBottom:4}}>✓ Virement signalé au syndic</div>
-                      <div style={{fontFamily:"system-ui",fontSize:12,color:"#475569"}}>En attente de confirmation — vous serez marqué "payé" dès réception.</div>
+                      <div style={{fontFamily:"system-ui",fontSize:12,color:"#475569",marginBottom:10}}>En attente de confirmation — vous serez marqué "payé" dès réception.</div>
+                      <button onClick={async()=>{
+                        const appels=(copro.appels||[]).map(ax=>{
+                          if(ax.id!==a.id) return ax;
+                          const payments=(ax.payments||[]).map(px=>
+                            px.owner===user.id?{...px,signaled:false,signaledAt:null}:px
+                          );
+                          return {...ax,payments};
+                        });
+                        await update({appels});
+                      }} style={{background:"none",border:"1px solid #1a3a5f",color:"#f87171",padding:"5px 14px",borderRadius:8,cursor:"pointer",fontFamily:"system-ui",fontSize:12}}>
+                        ✕ Annuler le signalement
+                      </button>
                     </div>
                   ) : (
                     <div style={{marginBottom:12}}>
