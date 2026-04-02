@@ -1494,7 +1494,7 @@ function DepensesTab({ copro, update }) {
 
 // ─── Paramètres ────────────────────────────────────────────
 function ParamsTab({ copro, update }) {
-  const [form,setForm]=useState({iban:copro.iban||"",refPriceM3:copro.refPriceM3||"",assuranceAnnuelle:copro.assuranceAnnuelle||"",adminPin:copro.adminPin||""});
+  const [form,setForm]=useState({iban:copro.iban||"",refPriceM3:copro.refPriceM3||"",assuranceAnnuelle:copro.assuranceAnnuelle||"",adminPin:copro.adminPin||"",paymentLink:copro.paymentLink||"https://revolut.me/bhazbri"});
   const [ok,setOk]=useState(false), [fetchSt,setFetchSt]=useState("idle"), [fetchR,setFetchR]=useState(null);
   async function autoFetch() {
     setFetchSt("loading"); setFetchR(null);
@@ -1511,7 +1511,7 @@ function ParamsTab({ copro, update }) {
     } catch { setFetchSt("error"); }
   }
   async function saveParams() {
-    await update({iban:form.iban,refPriceM3:form.refPriceM3,assuranceAnnuelle:form.assuranceAnnuelle,adminPin:form.adminPin});
+    await update({iban:form.iban,refPriceM3:form.refPriceM3,assuranceAnnuelle:form.assuranceAnnuelle,adminPin:form.adminPin,paymentLink:form.paymentLink||""});
     setOk(true); setTimeout(()=>setOk(false),2000);
   }
   return (
@@ -1519,8 +1519,46 @@ function ParamsTab({ copro, update }) {
       <h2 style={S.h2}>Paramètres</h2>
       <div style={S.card}>
         <div style={{fontFamily:"system-ui",fontSize:13,fontWeight:700,color:"#4ade80",marginBottom:10}}>🏦 Coordonnées bancaires</div>
-        <div style={{fontFamily:"system-ui",fontSize:12,color:"#475569",marginBottom:12}}>Affiché aux membres pour leurs virements.</div>
+        <div style={{fontFamily:"system-ui",fontSize:12,color:"#475569",marginBottom:12}}>Affiché aux membres pour leurs virements manuels.</div>
         <textarea value={form.iban} onChange={e=>setForm(p=>({...p,iban:e.target.value}))} placeholder={"FR76 XXXX XXXX XXXX XXXX XXXX XXX\nTitulaire : …"} style={{...S.inp,height:68,resize:"vertical"}}/>
+      </div>
+
+      <div style={S.card}>
+        <div style={{fontFamily:"system-ui",fontSize:13,fontWeight:700,color:"#a78bfa",marginBottom:6}}>💸 Lien de paiement direct (optionnel)</div>
+        <div style={{fontFamily:"system-ui",fontSize:12,color:"#475569",marginBottom:12,lineHeight:1.7}}>
+          Configurez votre lien de paiement — le membre clique et paie directement.<br/>
+          Choisissez votre service :
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:12}}>
+          {[
+            {id:"lydia",    label:"💜 Lydia/Sumeria", placeholder:"lydia-app.com/p/votre-pseudo"},
+            {id:"paypal",   label:"🔵 PayPal.me",     placeholder:"paypal.me/votre-pseudo"},
+            {id:"wise",     label:"🟢 Wise",          placeholder:"wise.com/pay/r/votre-id"},
+            {id:"revolut",  label:"⚫ Revolut",       placeholder:"revolut.me/votre-pseudo"},
+          ].map(s=>(
+            <button key={s.id}
+              onClick={()=>{
+                const base = s.id==="lydia"?"https://lydia-app.com/p/"
+                  :s.id==="paypal"?"https://paypal.me/"
+                  :s.id==="wise"?"https://wise.com/pay/r/"
+                  :"https://revolut.me/";
+                if (!form.paymentLink) setForm(p=>({...p,paymentLink:base}));
+              }}
+              style={{padding:"8px",borderRadius:8,border:"1px solid #1a3a5f",background:"#060c16",
+                color:"#94a3b8",fontFamily:"system-ui",fontSize:12,cursor:"pointer",textAlign:"left"}}>
+              {s.label}
+            </button>
+          ))}
+        </div>
+        <FL label="Votre lien de paiement (URL complète)">
+          <FI value={form.paymentLink||""} onChange={v=>setForm(p=>({...p,paymentLink:v}))}
+            placeholder="ex: https://lydia-app.com/p/votre-pseudo"/>
+        </FL>
+        {form.paymentLink && (
+          <div style={{fontFamily:"system-ui",fontSize:12,color:"#4ade80",marginTop:4}}>
+            ✓ Les membres verront un bouton pour payer directement avec le montant exact pré-rempli.
+          </div>
+        )}
       </div>
       <div style={S.card}>
         <div style={{fontFamily:"system-ui",fontSize:13,fontWeight:700,color:"#f59e0b",marginBottom:6}}>🔐 Code admin — Protection des index</div>
@@ -1556,105 +1594,106 @@ function ParamsTab({ copro, update }) {
 //  MICRO COMPOSANTS
 // ═══════════════════════════════════════════════════════
 
-// ─── Virement SEPA avec QR Code ────────────────────────────
+// ─── Virement — Lien direct ou détails ─────────────────────
 function SepaVirement({ copro, payment, user, appelTitle, onSignal }) {
-  const [showQR, setShowQR] = useState(false);
-  const [qrLoaded, setQrLoaded] = useState(false);
-  const qrRef = useRef(null);
+  const [showDetails, setShowDetails] = useState(false);
 
-  // Extraire l'IBAN propre (1ère ligne, sans espaces)
-  const rawIban = (copro.iban||"").split("\n")[0].replace(/\s/g,"").toUpperCase();
-  // Extraire le nom du titulaire (2ème ligne si dispo)
-  const ibanLines = (copro.iban||"").split("\n");
-  const benefName = ibanLines[1] ? ibanLines[1].replace(/^Titulaire\s*:\s*/i,"").trim() : "Copropriete";
-  const amount = Number(payment.amount).toFixed(2);
-  const ref = `${appelTitle} ${user.name}`.slice(0,35); // max 35 chars SEPA
+  const amt     = Number(payment.amount).toFixed(2);
+  const amtFmt  = fEUR(payment.amount);
+  const ref     = `${appelTitle} ${user.name}`.slice(0,35);
 
-  // Format QR SEPA (EPC069-12 standard)
-  const sepaQrData = [
-    "BCD",        // Service Tag
-    "002",        // Version
-    "1",          // Encoding UTF-8
-    "SCT",        // SEPA Credit Transfer
-    "",           // BIC (optionnel)
-    benefName.slice(0,70),  // Nom bénéficiaire
-    rawIban,      // IBAN
-    `EUR${amount}`, // Montant
-    "",           // Purpose (vide)
-    "",           // Reference structurée (vide)
-    ref,          // Reference non structurée
-    "CoproManager" // Display text
-  ].join("\n");
+  // IBAN pour affichage
+  const ibanLines  = (copro.iban||"").split("\n");
+  const rawIban    = ibanLines[0].replace(/\s/g,"").toUpperCase();
+  const ibanDisplay= rawIban.replace(/(.{4})/g,"$1 ").trim();
+  const titulaire  = ibanLines[1]?ibanLines[1].replace(/^Titulaire\s*:\s*/i,"").trim():"";
 
-  useEffect(() => {
-    if (!showQR) return;
-    // Charger QRCode.js depuis CDN si pas encore chargé
-    if (window.QRCode) { setQrLoaded(true); return; }
-    const s = document.createElement("script");
-    s.src = "https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js";
-    s.onload = () => setQrLoaded(true);
-    document.head.appendChild(s);
-  }, [showQR]);
+  // Construire le lien de paiement avec montant pré-rempli
+  function buildPaymentUrl() {
+    const base = (copro.paymentLink||"").trim().replace(/\/$/, "");
+    if (!base) return null;
+    const refEnc = encodeURIComponent(ref);
+    // Lydia/Sumeria
+    if (base.includes("lydia-app.com") || base.includes("sumeria.fr")) {
+      return `${base}?amount=${amt}&currency=eur&message=${refEnc}`;
+    }
+    // PayPal.me
+    if (base.includes("paypal.me")) {
+      return `${base}/${amt}EUR`;
+    }
+    // Revolut
+    if (base.includes("revolut.me")) {
+      return `${base}?amount=${amt}&currency=EUR`;
+    }
+    // Wise
+    if (base.includes("wise.com")) {
+      return `${base}?amount=${amt}&currency=EUR&reference=${refEnc}`;
+    }
+    // Lien générique — on ajoute juste amount et ref
+    return `${base}?amount=${amt}&reference=${refEnc}`;
+  }
 
-  useEffect(() => {
-    if (!qrLoaded || !showQR || !qrRef.current) return;
-    qrRef.current.innerHTML = "";
-    try {
-      new window.QRCode(qrRef.current, {
-        text: sepaQrData,
-        width: 220, height: 220,
-        colorDark: "#000000",
-        colorLight: "#ffffff",
-        correctLevel: window.QRCode.CorrectLevel.M,
-      });
-    } catch(e) { console.warn("QR error:", e); }
-  }, [qrLoaded, showQR, sepaQrData]);
+  const payUrl = buildPaymentUrl();
 
   return (
     <div style={{display:"flex",flexDirection:"column",gap:8}}>
 
-      {/* Bouton QR Code SEPA */}
-      <button onClick={()=>setShowQR(!showQR)}
-        style={{width:"100%",padding:"13px",borderRadius:10,border:"none",
-          background:showQR?"#1d4ed8":"linear-gradient(135deg,#059669,#10b981)",
-          color:"#fff",fontFamily:"system-ui",fontSize:15,fontWeight:700,cursor:"pointer"}}>
-        {showQR ? "✕ Fermer le QR code" : "📱 Scanner pour virer — " + fEUR(payment.amount)}
-      </button>
+      {/* Bouton lien direct si configuré */}
+      {payUrl ? (
+        <a href={payUrl} target="_blank" rel="noopener noreferrer"
+          style={{display:"block",width:"100%",padding:"14px",borderRadius:10,
+            background:"linear-gradient(135deg,#7c3aed,#a78bfa)",
+            color:"#fff",fontFamily:"system-ui",fontSize:15,fontWeight:700,
+            cursor:"pointer",textAlign:"center",textDecoration:"none",boxSizing:"border-box"}}>
+          💸 Payer {amtFmt} maintenant →
+        </a>
+      ) : (
+        /* Pas de lien configuré → bouton pour afficher les détails */
+        <button onClick={()=>setShowDetails(!showDetails)}
+          style={{width:"100%",padding:"13px",borderRadius:10,border:"none",
+            background:"linear-gradient(135deg,#059669,#10b981)",
+            color:"#fff",fontFamily:"system-ui",fontSize:15,fontWeight:700,cursor:"pointer"}}>
+          💳 Voir les coordonnées de virement — {amtFmt}
+        </button>
+      )}
 
-      {/* QR Code SEPA */}
-      {showQR && (
-        <div style={{background:"#fff",borderRadius:14,padding:"20px",textAlign:"center"}}>
-          <div style={{fontFamily:"system-ui",fontSize:12,color:"#334155",marginBottom:12,fontWeight:600}}>
-            📱 Ouvrez votre appli bancaire → Virement → Scanner QR
-          </div>
-          <div ref={qrRef} style={{display:"inline-block",borderRadius:8,overflow:"hidden"}}/>
-          {!qrLoaded && <div style={{color:"#64748b",fontSize:12,padding:"40px 0"}}>Chargement du QR code…</div>}
-          <div style={{fontFamily:"system-ui",fontSize:11,color:"#475569",marginTop:12,lineHeight:1.6}}>
-            Compatible : BNP, Crédit Agricole, Société Générale,<br/>
-            Boursorama, Revolut, N26, et toutes les banques SEPA
-          </div>
-          {/* Détails en texte pour vérification */}
-          <div style={{background:"#f8fafc",borderRadius:8,padding:"10px",marginTop:12,textAlign:"left"}}>
-            <div style={{fontFamily:"monospace",fontSize:11,color:"#334155",lineHeight:1.8}}>
-              <div>IBAN : <strong>{rawIban.replace(/(.{4})/g,"$1 ").trim()}</strong></div>
-              <div>Montant : <strong>{fEUR(payment.amount)}</strong></div>
-              <div>Référence : <strong>{ref}</strong></div>
+      {/* Lien configuré : option détails manuels aussi */}
+      {payUrl && (
+        <button onClick={()=>setShowDetails(!showDetails)}
+          style={{width:"100%",padding:"9px",borderRadius:9,border:"1px solid #1a3a5f",
+            background:"transparent",color:"#64748b",fontFamily:"system-ui",fontSize:12,cursor:"pointer"}}>
+          {showDetails?"✕ Fermer les détails":"📋 Voir les coordonnées bancaires (virement manuel)"}
+        </button>
+      )}
+
+      {/* Détails bancaires */}
+      {showDetails && (
+        <div style={{background:"#060c16",borderRadius:12,padding:"16px",border:"1px solid #1a3a5f"}}>
+          {[
+            ...(titulaire?[{label:"Titulaire",value:titulaire}]:[]),
+            {label:"IBAN",     value:ibanDisplay, copy:rawIban},
+            {label:"Montant",  value:amtFmt,      copy:amt},
+            {label:"Référence",value:ref},
+          ].map(({label,value,copy})=>(
+            <div key={label} style={{display:"flex",justifyContent:"space-between",alignItems:"center",
+              padding:"10px 12px",background:"#0a1628",borderRadius:9,marginBottom:8,gap:10}}>
+              <div style={{flex:1}}>
+                <div style={{fontFamily:"system-ui",fontSize:10,color:"#475569",textTransform:"uppercase",letterSpacing:1,marginBottom:3}}>{label}</div>
+                <div style={{fontFamily:"system-ui",fontSize:14,fontWeight:700,color:"#e2e8f0",wordBreak:"break-all"}}>{value}</div>
+              </div>
+              <CopyBtn text={copy||value} label="Copier"/>
             </div>
-          </div>
+          ))}
+          <CopyBtn text={`${titulaire?`Titulaire : ${titulaire}\n`:""}IBAN : ${rawIban}\nMontant : ${amtFmt}\nRéférence : ${ref}`} label="Tout copier"/>
         </div>
       )}
 
-      {/* Copier tous les détails */}
-      <CopyBtn
-        text={`IBAN : ${rawIban}\nMontant : ${fEUR(payment.amount)}\nRéférence : ${ref}`}
-        label="Copier les coordonnées bancaires"
-      />
-
-      {/* Notifier le syndic */}
+      {/* J'ai déjà payé */}
       <button onClick={onSignal}
         style={{width:"100%",padding:"10px",borderRadius:9,border:"1px solid #2563eb44",
-          background:"#0a1e38",color:"#60a5fa",fontFamily:"system-ui",fontSize:13,fontWeight:600,cursor:"pointer"}}>
-        ✓ J'ai déjà effectué le virement — notifier le syndic
+          background:"#0a1e38",color:"#60a5fa",fontFamily:"system-ui",fontSize:13,
+          fontWeight:600,cursor:"pointer"}}>
+        ✓ J'ai déjà effectué le paiement — notifier le syndic
       </button>
     </div>
   );
