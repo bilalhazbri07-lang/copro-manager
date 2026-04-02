@@ -195,26 +195,34 @@ function App() {
     persist({ ...cur, copros: cur.copros.map(c=>c.id===copro.id?copro:c) });
   }, [persist]);
 
-  // Auto-correction : recalcule priceM3 pour les appels "open" mal enregistrés
+  // Auto-correction et migration automatique au chargement
   useEffect(() => {
     if (!db?.copros) return;
     let needsFix = false;
     const fixedCopros = db.copros.map(c => {
-      const fixedAppels = (c.appels||[]).map(a => {
+      let fixed = {...c};
+
+      // 1. Injecter le lien Revolut si absent
+      if (!fixed.paymentLink) {
+        fixed.paymentLink = "https://revolut.me/bhazbri";
+        needsFix = true;
+      }
+
+      // 2. Corriger priceM3 des appels eau ouverts mal enregistrés
+      const fixedAppels = (fixed.appels||[]).map(a => {
         if (a.type !== "eau" || a.status !== "open") return a;
         if (!a.totalBill || !a.invoiceM3 || Number(a.invoiceM3) <= 0) return a;
         const correctPm3 = Number(a.totalBill) / Number(a.invoiceM3);
-        // Si priceM3 est absent ou manifestement faux (= invoiceM3)
         if (!a.priceM3 || Math.abs(Number(a.priceM3) - Number(a.invoiceM3)) < 0.01) {
           needsFix = true;
           return { ...a, priceM3: correctPm3 };
         }
         return a;
       });
-      return { ...c, appels: fixedAppels };
+      return { ...fixed, appels: fixedAppels };
     });
     if (needsFix) {
-      console.log("🔧 Correction automatique priceM3 appliquée");
+      console.log("🔧 Migration automatique appliquée");
       persist({ ...db, copros: fixedCopros });
     }
   }, [db?.copros?.length]);
