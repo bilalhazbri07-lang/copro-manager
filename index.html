@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="fr"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>CoproManager</title>
+<html lang="fr"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/><title>CoproManager</title>
 <style>*{box-sizing:border-box;margin:0;padding:0;}body{background:#07090f;}#root{min-height:100vh;}input,select,textarea,button{font-family:system-ui,sans-serif;}</style>
 </head><body><div id="root"></div>
 <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
@@ -921,15 +921,10 @@ function InlineReleveForm({ appels, user, copro, update }) {
         const lastIdx=getLastIndex();
         const cur=vals[a.id]||"";
         const previewConso=cur&&lastIdx?Math.max(0,Number(cur)-lastIdx):cur?Number(cur):null;
-        // Prix m³ : TOUJOURS calculé depuis totalBill ÷ invoiceM3 (source de vérité)
-        // On n'utilise a.priceM3 que si l'appel est déjà validé (status !== open)
-        const pm3 = (a.status !== "open" && a.priceM3)
-          ? Number(a.priceM3)
-          : (a.totalBill && a.invoiceM3 && Number(a.invoiceM3) > 0)
-            ? Number(a.totalBill) / Number(a.invoiceM3)
-            : (copro.refPriceM3 && Number(copro.refPriceM3) > 0 && Number(copro.refPriceM3) < 50)
-              ? Number(copro.refPriceM3)
-              : null;
+        // Prix m³ : totalBill ÷ invoiceM3 TOUJOURS (jamais refPriceM3 pour l'eau)
+        const _bill = Number(a.totalBill) || 0;
+        const _vol  = Number(a.invoiceM3) || 0;
+        const pm3   = _bill > 0 && _vol > 0 ? _bill / _vol : null;
         const previewEur=previewConso!=null&&pm3?previewConso*pm3:null;
         return (
           <div key={a.id} style={{...S.card,border:`1px solid ${r?"#166834":"#f59e0b55"}`}}>
@@ -937,7 +932,9 @@ function InlineReleveForm({ appels, user, copro, update }) {
               <div>
                 <div style={{fontFamily:"system-ui",fontSize:15,fontWeight:700,color:"#f0f9ff"}}>💧 {a.title}</div>
                 <div style={{fontFamily:"system-ui",fontSize:12,color:"#64748b",marginTop:3}}>
-                  {fDATE(a.date)}{a.totalBill&&<span style={{color:"#f59e0b",marginLeft:8}}>Facture : {fEUR(a.totalBill)}</span>}
+                  {fDATE(a.date)}
+                  {a.totalBill&&<span style={{color:"#f59e0b",marginLeft:8}}>Facture : {fEUR(a.totalBill)}</span>}
+                  {a.invoiceM3&&<span style={{color:"#38bdf8",marginLeft:8}}>{Number(a.invoiceM3).toFixed(3)} m³ → {(Number(a.totalBill)/Number(a.invoiceM3)).toFixed(5)} €/m³</span>}
                 </div>
               </div>
               <span style={{fontFamily:"system-ui",fontSize:11,padding:"3px 10px",borderRadius:20,background:r?"#14532d":"#f59e0b22",color:r?"#4ade80":"#f59e0b"}}>
@@ -955,7 +952,7 @@ function InlineReleveForm({ appels, user, copro, update }) {
                   ))}
                 </div>
                 {pm3&&<div style={{background:"#060c16",borderRadius:8,padding:"10px",fontFamily:"system-ui",fontSize:13,textAlign:"center"}}>
-                  {fM3(r.m3)} m³ × {pm3 ? pm3.toFixed(5) : "?"} €/m³ = <strong style={{color:"#f59e0b"}}>{pm3 ? fEUR(r.m3*pm3) : "—"}</strong>
+                  {fM3(r.m3)} m³ × {pm3 ? pm3.toFixed(5) : (_bill>0&&_vol>0?(_bill/_vol).toFixed(5):"?")} €/m³ = <strong style={{color:"#f59e0b"}}>{pm3 ? fEUR(r.m3*pm3) : "—"}</strong>
                   <div style={{color:"#475569",fontSize:11,marginTop:2}}>Estimation — montant exact calculé quand tous ont saisi</div>
                 </div>}
                 <div style={{textAlign:"right",marginTop:10}}>
