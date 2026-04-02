@@ -1,22 +1,12 @@
 <!DOCTYPE html>
-<html lang="fr">
-<head>
-  <meta charset="UTF-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>CoproManager</title>
-  <style>
-    * { box-sizing:border-box; margin:0; padding:0; }
-    body { background:#07090f; }
-    #root { min-height:100vh; }
-    input,select,textarea,button { font-family:system-ui,sans-serif; }
-  </style>
-</head>
-<body>
-  <div id="root"></div>
-  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-  <script src="https://unpkg.com/@babel/standalone@7.23.5/babel.min.js"></script>
-  <script type="text/babel" data-presets="react">
+<html lang="fr"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>CoproManager</title>
+<style>*{box-sizing:border-box;margin:0;padding:0;}body{background:#07090f;}#root{min-height:100vh;}input,select,textarea,button{font-family:system-ui,sans-serif;}</style>
+</head><body>
+<div id="root"></div>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.23.5/babel.min.js"></script>
+<script type="text/babel" data-presets="react">
 const { useState, useEffect, useRef, useCallback } = React;
 
 // ═══════════════════════════════════════════════════════
@@ -908,7 +898,10 @@ function InlineReleveForm({ appels, user, copro, update }) {
         const lastIdx=getLastIndex();
         const cur=vals[a.id]||"";
         const previewConso=cur&&lastIdx?Math.max(0,Number(cur)-lastIdx):cur?Number(cur):null;
-        const pm3=a.priceM3||(copro.refPriceM3?Number(copro.refPriceM3):null);
+        // Prix m³ : depuis l'appel validé, ou calculé depuis totalBill/invoiceM3
+        const pm3 = a.priceM3
+          || (a.totalBill && a.invoiceM3 && Number(a.invoiceM3)>0 ? Number(a.totalBill)/Number(a.invoiceM3) : null)
+          || (copro.refPriceM3 && Number(copro.refPriceM3)>0 && Number(copro.refPriceM3)<50 ? Number(copro.refPriceM3) : null);
         const previewEur=previewConso!=null&&pm3?previewConso*pm3:null;
         return (
           <div key={a.id} style={{...S.card,border:`1px solid ${r?"#166834":"#f59e0b55"}`}}>
@@ -934,7 +927,7 @@ function InlineReleveForm({ appels, user, copro, update }) {
                   ))}
                 </div>
                 {pm3&&<div style={{background:"#060c16",borderRadius:8,padding:"10px",fontFamily:"system-ui",fontSize:13,textAlign:"center"}}>
-                  {fM3(r.m3)} m³ × {pm3.toFixed(5)} € = <strong style={{color:"#f59e0b"}}>{fEUR(r.m3*pm3)}</strong>
+                  {fM3(r.m3)} m³ × {pm3 ? pm3.toFixed(5) : "?"} €/m³ = <strong style={{color:"#f59e0b"}}>{pm3 ? fEUR(r.m3*pm3) : "—"}</strong>
                   <div style={{color:"#475569",fontSize:11,marginTop:2}}>Estimation — montant exact calculé quand tous ont saisi</div>
                 </div>}
                 <div style={{textAlign:"right",marginTop:10}}>
@@ -1553,7 +1546,5 @@ const S={
   h2:     {margin:"0 0 20px",fontSize:19,color:"#f0f9ff",fontFamily:"Georgia,serif"},
 };
 
-    ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
-  </script>
-</body>
-</html>
+ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
+</script></body></html>
