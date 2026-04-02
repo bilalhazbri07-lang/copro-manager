@@ -1014,6 +1014,7 @@ function InlineReleveForm({ appels, user, copro, update }) {
 function AppelsTab({ copro, members, update }) {
   const [show,setShow]=useState(false), [type,setType]=useState("eau"), [title,setTitle]=useState(""), [date,setDate]=useState(TODAY()), [note,setNote]=useState("");
   const [bill,setBill]=useState(""), [invM3,setInvM3]=useState(""), [mAmts,setMAmts]=useState({});
+  const [editAppel,setEditAppel]=useState(null); // appel en cours de modification
 
   function handleBill(v) {
     setBill(v);
@@ -1042,8 +1043,19 @@ function AppelsTab({ copro, members, update }) {
       const pmts=members.map(m=>({owner:m.id,ownerName:m.name,amount:Number(mAmts[m.id]||0),paid:false,paidDate:null}));
       ap={...ap,totalBill:pmts.reduce((s,p)=>s+p.amount,0),payments:pmts};
     }
-    await update({appels:[ap,...(copro.appels||[])]});
-    setTitle(""); setBill(""); setInvM3(""); setNote(""); setMAmts({}); setShow(false);
+    let newAppels;
+    if (editAppel) {
+      // Mode modification : on met à jour l'appel existant sans toucher aux relevés
+      newAppels = (copro.appels||[]).map(a => a.id!==editAppel.id ? a : {
+        ...a,
+        title: ap.title, date: ap.date, note: ap.note,
+        totalBill: ap.totalBill, invoiceM3: ap.invoiceM3,
+      });
+    } else {
+      newAppels = [ap,...(copro.appels||[])];
+    }
+    await update({appels: newAppels});
+    setTitle(""); setBill(""); setInvM3(""); setNote(""); setMAmts({}); setShow(false); setEditAppel(null);
   }
 
   // Validation : utilise calcEauParts — FONCTION UNIQUE
@@ -1091,16 +1103,22 @@ function AppelsTab({ copro, members, update }) {
     <div>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
         <h2 style={S.h2}>Appels de fonds</h2>
-        <Btn small onClick={()=>setShow(!show)}>{show?"✕ Annuler":"+ Nouvel appel"}</Btn>
+        <Btn small onClick={()=>{setShow(!show);setEditAppel(null);}}>{show?"✕ Annuler":"+ Nouvel appel"}</Btn>
       </div>
       {members.length===0&&show&&<div style={{...S.card,border:"1px solid #f59e0b44",marginBottom:14}}><div style={{fontFamily:"system-ui",fontSize:13,color:"#fde68a"}}>⚠️ Aucun membre actif. Ajoutez d'abord des utilisateurs.</div></div>}
       {show&&(
         <div style={S.card}>
-          <div style={{display:"flex",gap:8,marginBottom:18}}>
-            {[{id:"eau",l:"💧 Eau"},{id:"assurance",l:"🛡️ Assurance"},{id:"autre",l:"📁 Autre"}].map(t=>(
-              <button key={t.id} onClick={()=>setType(t.id)} style={{flex:1,padding:"9px 4px",borderRadius:10,border:`2px solid ${type===t.id?"#2563eb":"#1a3a5f"}`,background:type===t.id?"#1d4ed822":"transparent",color:type===t.id?"#7dd3fc":"#64748b",fontFamily:"system-ui",fontWeight:700,fontSize:13,cursor:"pointer"}}>{t.l}</button>
-            ))}
-          </div>
+          {editAppel ? (
+            <div style={{fontFamily:"system-ui",fontSize:13,fontWeight:700,color:"#60a5fa",marginBottom:18}}>
+              ✏️ Modifier la facture — {editAppel.title}
+            </div>
+          ) : (
+            <div style={{display:"flex",gap:8,marginBottom:18}}>
+              {[{id:"eau",l:"💧 Eau"},{id:"assurance",l:"🛡️ Assurance"},{id:"autre",l:"📁 Autre"}].map(t=>(
+                <button key={t.id} onClick={()=>setType(t.id)} style={{flex:1,padding:"9px 4px",borderRadius:10,border:`2px solid ${type===t.id?"#2563eb":"#1a3a5f"}`,background:type===t.id?"#1d4ed822":"transparent",color:type===t.id?"#7dd3fc":"#64748b",fontFamily:"system-ui",fontWeight:700,fontSize:13,cursor:"pointer"}}>{t.l}</button>
+              ))}
+            </div>
+          )}
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
             <FL label="Titre *"><FI value={title} onChange={setTitle} placeholder={type==="eau"?"Eau T2 2025":type==="assurance"?"Assurance 2025":"Libellé"}/></FL>
             <FL label="Date"><input type="date" value={date} onChange={e=>setDate(e.target.value)} style={S.inp}/></FL>
@@ -1200,8 +1218,17 @@ function AppelsTab({ copro, members, update }) {
                 </div>
               </div>
             ))}
-            <div style={{textAlign:"right",marginTop:8}}>
-              <button onClick={()=>delAppel(a.id)} style={{background:"none",border:"none",color:"#334155",cursor:"pointer",fontSize:12,fontFamily:"system-ui"}}>🗑 Supprimer</button>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:8}}>
+              {a.status==="open"&&(
+                <button onClick={()=>{
+                  setEditAppel(a);
+                  setTitle(a.title); setBill(String(a.totalBill||"")); setInvM3(String(a.invoiceM3||""));
+                  setDate(a.date); setNote(a.note||""); setShow(true);
+                }} style={{background:"none",border:"1px solid #1a3a5f",color:"#60a5fa",padding:"5px 14px",borderRadius:8,cursor:"pointer",fontSize:12,fontFamily:"system-ui"}}>
+                  ✏️ Modifier la facture
+                </button>
+              )}
+              <button onClick={()=>delAppel(a.id)} style={{background:"none",border:"none",color:"#334155",cursor:"pointer",fontSize:12,fontFamily:"system-ui",marginLeft:"auto"}}>🗑 Supprimer</button>
             </div>
           </div>
         );
