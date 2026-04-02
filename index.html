@@ -722,26 +722,54 @@ function Dashboard({ copro, user, isSyndic, balance, members, update }) {
                     <div><span style={{color:"#64748b"}}>Référence : </span><strong style={{color:"#f0f9ff"}}>{p.appelTitle} — {user.name}</strong></div>
                     <CopyBtn text={`${p.appelTitle} — ${user.name}`} label="Copier réf."/>
                   </div>
-                  <div style={{fontFamily:"system-ui",fontSize:11,color:"#475569",marginTop:8,fontStyle:"italic",marginBottom:10}}>✉️ Le syndic confirmera la réception.</div>
-                  {/* Bouton J'ai viré */}
+                  <div style={{fontFamily:"system-ui",fontSize:11,color:"#475569",marginTop:8,fontStyle:"italic",marginBottom:12}}>✉️ Le syndic confirmera la réception dès que le virement arrivera.</div>
+
                   {!p.signaled ? (
-                    <button onClick={async()=>{
-                      const appels=(copro.appels||[]).map(a=>{
-                        const myAppel=(a.payments||[]).some(px=>px.owner===user.id&&!px.paid&&px.amount===p.amount);
-                        if(!myAppel) return a;
-                        const payments=(a.payments||[]).map(px=>
-                          (px.owner===user.id&&px.amount===p.amount)?{...px,signaled:true,signaledAt:new Date().toISOString()}:px
-                        );
-                        return {...a,payments};
-                      });
-                      await update({appels});
-                    }} style={{width:"100%",padding:"10px",borderRadius:9,border:"none",background:"linear-gradient(135deg,#1d4ed8,#3b82f6)",color:"#fff",fontFamily:"system-ui",fontSize:14,fontWeight:700,cursor:"pointer"}}>
-                      💸 J'ai effectué le virement
-                    </button>
+                    <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                      {/* Bouton virement direct — ouvre l'app bancaire */}
+                      {copro.iban && (() => {
+                        // Extraire l'IBAN brut (première ligne, sans espaces)
+                        const rawIban = copro.iban.split("\n")[0].replace(/\s/g,"").toUpperCase();
+                        const isValidIban = /^[A-Z]{2}[0-9]{2}[A-Z0-9]+$/.test(rawIban);
+                        const ref = encodeURIComponent(`${p.appelTitle} ${user.name}`);
+                        const amt = Number(p.amount).toFixed(2);
+                        const paytoUrl = `payto://iban/${rawIban}?amount=EUR:${amt}&message=${ref}`;
+                        return isValidIban ? (
+                          <a href={paytoUrl}
+                            style={{display:"block",width:"100%",padding:"12px",borderRadius:10,border:"none",background:"linear-gradient(135deg,#059669,#10b981)",color:"#fff",fontFamily:"system-ui",fontSize:15,fontWeight:700,cursor:"pointer",textAlign:"center",textDecoration:"none"}}>
+                            🏦 Effectuer le virement — {fEUR(p.amount)}
+                          </a>
+                        ) : null;
+                      })()}
+
+                      {/* Bouton "Tout copier" pour coller dans son appli bancaire */}
+                      <CopyBtn
+                        text={`Bénéficiaire : ${copro.iban}
+Montant : ${fEUR(p.amount)}
+Référence : ${p.appelTitle} — ${user.name}`}
+                        label="Copier tous les détails du virement"
+                      />
+
+                      {/* Confirmation manuelle */}
+                      <button onClick={async()=>{
+                        const appels=(copro.appels||[]).map(a=>{
+                          const hasPayment=(a.payments||[]).some(px=>px.owner===user.id&&!px.paid&&Number(px.amount)===Number(p.amount));
+                          if(!hasPayment) return a;
+                          const payments=(a.payments||[]).map(px=>
+                            (px.owner===user.id&&Number(px.amount)===Number(p.amount))
+                              ?{...px,signaled:true,signaledAt:new Date().toISOString()}:px
+                          );
+                          return {...a,payments};
+                        });
+                        await update({appels});
+                      }} style={{width:"100%",padding:"10px",borderRadius:9,border:"1px solid #2563eb44",background:"#0a1e38",color:"#60a5fa",fontFamily:"system-ui",fontSize:13,fontWeight:600,cursor:"pointer"}}>
+                        ✓ J'ai déjà effectué le virement — notifier le syndic
+                      </button>
+                    </div>
                   ):(
-                    <div style={{background:"#1d4ed822",borderRadius:9,padding:"10px",border:"1px solid #2563eb44",textAlign:"center",fontFamily:"system-ui",fontSize:13}}>
-                      <span style={{color:"#60a5fa",fontWeight:700}}>✓ Virement signalé</span>
-                      <span style={{color:"#475569",marginLeft:8}}>En attente de confirmation du syndic</span>
+                    <div style={{background:"#1d4ed822",borderRadius:9,padding:"12px",border:"1px solid #2563eb44",textAlign:"center"}}>
+                      <div style={{fontFamily:"system-ui",fontSize:14,fontWeight:700,color:"#60a5fa",marginBottom:4}}>✓ Virement signalé au syndic</div>
+                      <div style={{fontFamily:"system-ui",fontSize:12,color:"#475569"}}>En attente de confirmation — vous serez marqué "payé" dès réception.</div>
                     </div>
                   )}
                 </div>
