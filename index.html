@@ -1,8 +1,7 @@
 <!DOCTYPE html>
 <html lang="fr"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>CoproManager</title>
 <style>*{box-sizing:border-box;margin:0;padding:0;}body{background:#07090f;}#root{min-height:100vh;}input,select,textarea,button{font-family:system-ui,sans-serif;}</style>
-</head><body>
-<div id="root"></div>
+</head><body><div id="root"></div>
 <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone@7.23.5/babel.min.js"></script>
@@ -195,6 +194,30 @@ function App() {
     const cur = dbRef.current; if (!cur) return;
     persist({ ...cur, copros: cur.copros.map(c=>c.id===copro.id?copro:c) });
   }, [persist]);
+
+  // Auto-correction : recalcule priceM3 pour les appels "open" mal enregistrés
+  useEffect(() => {
+    if (!db?.copros) return;
+    let needsFix = false;
+    const fixedCopros = db.copros.map(c => {
+      const fixedAppels = (c.appels||[]).map(a => {
+        if (a.type !== "eau" || a.status !== "open") return a;
+        if (!a.totalBill || !a.invoiceM3 || Number(a.invoiceM3) <= 0) return a;
+        const correctPm3 = Number(a.totalBill) / Number(a.invoiceM3);
+        // Si priceM3 est absent ou manifestement faux (= invoiceM3)
+        if (!a.priceM3 || Math.abs(Number(a.priceM3) - Number(a.invoiceM3)) < 0.01) {
+          needsFix = true;
+          return { ...a, priceM3: correctPm3 };
+        }
+        return a;
+      });
+      return { ...c, appels: fixedAppels };
+    });
+    if (needsFix) {
+      console.log("🔧 Correction automatique priceM3 appliquée");
+      persist({ ...db, copros: fixedCopros });
+    }
+  }, [db?.copros?.length]);
 
   // Chargement initial
   useEffect(() => {
@@ -898,10 +921,15 @@ function InlineReleveForm({ appels, user, copro, update }) {
         const lastIdx=getLastIndex();
         const cur=vals[a.id]||"";
         const previewConso=cur&&lastIdx?Math.max(0,Number(cur)-lastIdx):cur?Number(cur):null;
-        // Prix m³ : depuis l'appel validé, ou calculé depuis totalBill/invoiceM3
-        const pm3 = a.priceM3
-          || (a.totalBill && a.invoiceM3 && Number(a.invoiceM3)>0 ? Number(a.totalBill)/Number(a.invoiceM3) : null)
-          || (copro.refPriceM3 && Number(copro.refPriceM3)>0 && Number(copro.refPriceM3)<50 ? Number(copro.refPriceM3) : null);
+        // Prix m³ : TOUJOURS calculé depuis totalBill ÷ invoiceM3 (source de vérité)
+        // On n'utilise a.priceM3 que si l'appel est déjà validé (status !== open)
+        const pm3 = (a.status !== "open" && a.priceM3)
+          ? Number(a.priceM3)
+          : (a.totalBill && a.invoiceM3 && Number(a.invoiceM3) > 0)
+            ? Number(a.totalBill) / Number(a.invoiceM3)
+            : (copro.refPriceM3 && Number(copro.refPriceM3) > 0 && Number(copro.refPriceM3) < 50)
+              ? Number(copro.refPriceM3)
+              : null;
         const previewEur=previewConso!=null&&pm3?previewConso*pm3:null;
         return (
           <div key={a.id} style={{...S.card,border:`1px solid ${r?"#166834":"#f59e0b55"}`}}>
