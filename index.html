@@ -33,9 +33,16 @@ async function initFirebase() {
     if (!window.__fb_loaded) {
       await loadScript("https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js");
       await loadScript("https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js");
+      await loadScript("https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js");
       window.__fb_loaded = true;
     }
     if (!window.__fb_app) window.__fb_app = firebase.initializeApp(FIREBASE_CONFIG);
+    // Authentification anonyme — requis pour accéder à la base sécurisée
+    const auth = firebase.auth();
+    if (!auth.currentUser) {
+      await auth.signInAnonymously();
+      console.log("🔐 Authentifié anonymement");
+    }
     _fbRef = firebase.database().ref(FB_PATH);
     _fbReady = true;
     return true;
