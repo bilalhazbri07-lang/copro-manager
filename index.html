@@ -149,31 +149,51 @@ function splitEqual(total, n) {
   return arr;
 }
 
-// ── Calcul eau — FONCTION UNIQUE ────────────────────────
-// Prix m³ = totalBill / invoiceM3 (volume officiel de la facture)
-// Conso de chaque membre = index actuel - index précédent
-// Ajustement : différence entre somme des consommations relevées et volume facturé,
-//              répartie également entre tous les membres
-// Part finale = conso ajustée × prix m³ (dernier ajusté pour total exact)
+// ── Calcul eau — MÉTHODE OFFICIELLE ────────────────────────
+//
+// 1. Prix m³    = totalBill ÷ invoiceM3 (m³ facturés)
+// 2. Conso      = index actuel − index précédent
+// 3. Part conso = conso × prix m³
+// 4. Surplus    = (Σ consos relevées − invoiceM3) × prix m³
+// 5. Part surp. = surplus ÷ nb propriétaires
+// 6. Total      = part conso + part surplus
+//
+// ⚠️ Le total final peut dépasser totalBill — c'est VOULU
+//    (le surplus des relevés est refacturé en plus, réparti équitablement)
+//
 function calcEauParts(releves, totalBill, invoiceM3) {
   const n = releves.length;
   if (!n || !totalBill || !invoiceM3) return null;
-  const pm3 = Number(totalBill) / Number(invoiceM3);
-  const consos = releves.map(r => Number(r.m3));
-  const totalReleve = consos.reduce((s,v)=>s+v, 0);
-  const diff = Number(invoiceM3) - totalReleve; // m³ non attribués
-  const adj = diff / n;                          // ajustement par membre
-  const consosAjustees = consos.map(c => Math.max(0, c + adj));
-  const raw = consosAjustees.map(c => c * pm3);
-  const rounded = raw.map(v => Math.round(v*100)/100);
-  const lastAdj = Math.round((Number(totalBill) - rounded.reduce((s,v)=>s+v,0))*100)/100;
-  rounded[rounded.length-1] = Math.round((rounded[rounded.length-1]+lastAdj)*100)/100;
-  return releves.map((r,i) => ({
-    owner: r.ownerId, ownerName: r.ownerName,
-    amount: rounded[i], m3: consos[i], m3Ajuste: Math.round(consosAjustees[i]*1000)/1000,
-    adjustment: Math.round(adj*1000)/1000, priceM3: pm3,
-    currentIndex: r.currentIndex, lastIndex: r.lastIndex,
-    paid: false, paidDate: null,
+
+  const bill   = Number(totalBill);
+  const vol    = Number(invoiceM3);
+  const pm3    = bill / vol;                              // 1. Prix m³
+
+  const consos      = releves.map(r => Number(r.m3));
+  const totalConso  = consos.reduce((s,v) => s+v, 0);   // Σ consos
+
+  const partsConso  = consos.map(c => c * pm3);          // 3. Parts conso
+
+  const surplusM3   = totalConso - vol;                  // m³ en surplus
+  const surplusEUR  = surplusM3 * pm3;                   // 4. Surplus €
+  const partSurplus = surplusEUR / n;                    // 5. Part surplus
+
+  // 6. Totaux arrondis à 2 décimales
+  const raw     = partsConso.map(p => p + partSurplus);
+  const rounded = raw.map(v => Math.round(v * 100) / 100);
+
+  return releves.map((r, i) => ({
+    owner:         r.ownerId,
+    ownerName:     r.ownerName,
+    amount:        rounded[i],
+    m3:            consos[i],
+    priceM3:       pm3,
+    surplusM3:     Math.round(surplusM3 * 1000) / 1000,
+    partSurplus:   Math.round(partSurplus * 100) / 100,
+    currentIndex:  r.currentIndex,
+    lastIndex:     r.lastIndex,
+    paid:          false,
+    paidDate:      null,
   }));
 }
 
@@ -639,12 +659,13 @@ function CoproApp({ copro, user, persist, onLogout, lastSaved, onBackAdmin, onEx
   })();
   async function update(patch) { await persist({...copro,...patch}); }
   const TABS=[
-    {id:"dashboard",label:"🏠 Accueil",   show:true},
-    {id:"appels",   label:"📢 Appels",     show:isSyndic},
-    {id:"compteurs",label:"🔢 Compteurs",  show:isSyndic},
-    {id:"caisse",   label:"🏦 Caisse",     show:isSyndic},
-    {id:"depenses", label:"💸 Dépenses",   show:isSyndic},
-    {id:"params",   label:"⚙️ Paramètres", show:isSyndic},
+    {id:"dashboard", label:"🏠 Accueil",    show:true},
+    {id:"releves",   label:"💧 Relevés",    show:isSyndic},
+    {id:"appels",    label:"📢 Appels",     show:isSyndic},
+    {id:"compteurs", label:"🔢 Compteurs",  show:isSyndic},
+    {id:"caisse",    label:"🏦 Caisse",     show:isSyndic},
+    {id:"depenses",  label:"💸 Dépenses",   show:isSyndic},
+    {id:"params",    label:"⚙️ Paramètres", show:isSyndic},
   ].filter(t=>t.show);
   return (
     <div style={S.root}>
@@ -664,6 +685,7 @@ function CoproApp({ copro, user, persist, onLogout, lastSaved, onBackAdmin, onEx
       </div>
       <main style={S.main}>
         {tab==="dashboard"&&<Dashboard copro={copro} user={user} isSyndic={isSyndic} balance={balance} members={members} update={update}/>}
+        {tab==="releves"&&isSyndic&&<RelevesTab copro={copro} members={members} update={update}/>}
         {tab==="appels"&&isSyndic&&<AppelsTab copro={copro} members={members} update={update}/>}
         {tab==="compteurs"&&isSyndic&&<CompteursTab copro={copro} update={update}/>}
         {tab==="caisse"&&isSyndic&&<CaisseTab copro={copro} balance={balance} update={update}/>}
@@ -974,9 +996,18 @@ function InlineReleveForm({ appels, user, copro, update }) {
                     </div>
                   ))}
                 </div>
-                {pm3&&<div style={{background:"#060c16",borderRadius:8,padding:"10px",fontFamily:"system-ui",fontSize:13,textAlign:"center",marginBottom:12}}>
-                  {fM3(r.m3)} m³ × {pm3 ? pm3.toFixed(5) : (_bill>0&&_vol>0?(_bill/_vol).toFixed(5):"?")} €/m³ = <strong style={{color:"#f59e0b"}}>{pm3 ? fEUR(r.m3*pm3) : "—"}</strong>
-                  <div style={{color:"#475569",fontSize:11,marginTop:2}}>Estimation — montant exact calculé quand tous ont saisi</div>
+                {pm3&&<div style={{background:"#060c16",borderRadius:8,padding:"12px",fontFamily:"system-ui",fontSize:12,marginBottom:12}}>
+                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+                    <span style={{color:"#64748b"}}>Part conso :</span>
+                    <span style={{color:"#38bdf8"}}>{fM3(r.m3)} m³ × {pm3.toFixed(5)} € = <strong>{fEUR(r.m3*pm3)}</strong></span>
+                  </div>
+                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:8}}>
+                    <span style={{color:"#64748b"}}>Part surplus :</span>
+                    <span style={{color:"#f59e0b"}}>calculée à la validation</span>
+                  </div>
+                  <div style={{borderTop:"1px solid #1a3a5f",paddingTop:8,textAlign:"center",fontFamily:"system-ui",fontSize:11,color:"#475569"}}>
+                    Estimation partielle — surplus ajouté quand tous ont saisi
+                  </div>
                 </div>}
 
                 {/* Bouton virement anticipé — dès que l'index est saisi */}
@@ -1272,9 +1303,10 @@ function AppelsTab({ copro, members, update }) {
                   <button onClick={()=>togglePaid(a.id,p.owner)} style={{width:26,height:26,borderRadius:7,border:`2px solid ${p.paid?"#4ade80":"#3b82f6"}`,background:p.paid?"#4ade80":"transparent",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,color:"#0a1628",flexShrink:0}}>{p.paid?"✓":""}</button>
                   <div>
                     <div style={{fontFamily:"system-ui",fontSize:13,color:p.paid?"#86efac":"#e2e8f0",fontWeight:600}}>{p.ownerName}</div>
-                    {a.type==="eau"&&p.m3>0&&<div style={{fontFamily:"system-ui",fontSize:11,color:"#38bdf8"}}>
-                      {fM3(p.lastIndex||0)} → {fM3(p.currentIndex||0)} m³ | conso: {fM3(p.m3)} m³
-                      {p.adjustment&&p.adjustment!==0&&<span style={{color:"#64748b"}}> (ajust. {p.adjustment>0?"+":""}{fM3(p.adjustment)})</span>}
+                    {a.type==="eau"&&p.m3>0&&<div style={{fontFamily:"system-ui",fontSize:11,color:"#38bdf8",lineHeight:1.7}}>
+                      <span>{fM3(p.lastIndex||0)} → {fM3(p.currentIndex||0)} m³ | conso : {fM3(p.m3)} m³</span><br/>
+                      <span style={{color:"#a78bfa"}}>{fM3(p.m3)} × {p.priceM3?p.priceM3.toFixed(5):"?"} €/m³ = {fEUR(p.m3*(p.priceM3||0))}</span>
+                      {p.partSurplus>0&&<><br/><span style={{color:"#f59e0b"}}>+ surplus {fEUR(p.partSurplus)}</span></>}
                     </div>}
                   </div>
                 </div>
@@ -1299,6 +1331,198 @@ function AppelsTab({ copro, members, update }) {
           </div>
         );
       })}
+    </div>
+  );
+}
+
+// ─── Relevés eau (syndic) — calculateur + historique ───────
+function calcReleve(lines, totalBill, invoiceM3) {
+  const bill = Number(totalBill)||0, vol = Number(invoiceM3)||0;
+  const valid = lines.filter(l => l.nouveau!=="" && l.ancien!=="" && !isNaN(Number(l.nouveau)) && !isNaN(Number(l.ancien)));
+  if (!bill || !vol || valid.length!==lines.length || !lines.length) return null;
+  const pm3 = bill / vol;
+  const withConso = lines.map(l => ({ ...l, conso: Math.round((Number(l.nouveau)-Number(l.ancien))*1000)/1000 }));
+  if (withConso.some(l => l.conso < 0)) return { error: "Un nouvel index est inférieur à l'ancien." };
+  const totalConso = withConso.reduce((s,l)=>s+l.conso,0);
+  const surplusM3  = Math.round((totalConso - vol)*1000)/1000;   // + = surplus, − = manque
+  const surplusEUR = surplusM3 * pm3;
+  const partSurplus = surplusEUR / lines.length;
+  const out = withConso.map(l => {
+    // Chaque part est arrondie, puis additionnée → le détail affiché tombe juste
+    const pc = Math.round(l.conso * pm3 * 100)/100;
+    const ps = Math.round(partSurplus * 100)/100;
+    return { ...l, partConso: pc, partSurplus: ps, total: Math.round((pc + ps)*100)/100 };
+  });
+  return { lines: out, pm3, totalConso, surplusM3, surplusEUR: Math.round(surplusEUR*100)/100,
+           totalFinal: Math.round(out.reduce((s,l)=>s+l.total,0)*100)/100 };
+}
+
+function RelevesTab({ copro, members, update }) {
+  const history = [...(copro.relevesEau||[])].sort((a,b)=>new Date(b.date)-new Date(a.date));
+  const last = history[0];
+  const [editing, setEditing] = useState(false);
+  const [title, setTitle] = useState("");
+  const [date, setDate]   = useState(TODAY());
+  const [bill, setBill]   = useState("");
+  const [vol, setVol]     = useState("");
+  const [lines, setLines] = useState([]);
+  const [createAppel, setCreateAppel] = useState(true);
+  const [openId, setOpenId] = useState(null);
+  const [saved, setSaved] = useState(false);
+
+  function startNew() {
+    // Reprend automatiquement le dernier relevé comme "ancien"
+    setLines(members.map(m => {
+      const prev = last?.lines?.find(l=>l.userId===m.id);
+      const ancien = prev ? prev.nouveau : (m.lastIndex ?? "");
+      return { userId:m.id, name:m.name, ancien: ancien===""?"":String(ancien), nouveau:"" };
+    }));
+    setTitle(""); setDate(TODAY()); setBill(""); setVol(""); setEditing(true);
+  }
+
+  const setLine = (i, k, v) => setLines(ls => ls.map((l,j)=>j===i?{...l,[k]:v}:l));
+  const res = editing ? calcReleve(lines, bill, vol) : null;
+  const ok  = res && !res.error && title.trim();
+
+  async function save() {
+    if (!ok) return;
+    const id = uid();
+    const releve = { id, title:title.trim(), date, totalBill:Number(bill), invoiceM3:Number(vol),
+      pm3:res.pm3, totalConso:res.totalConso, surplusM3:res.surplusM3, surplusEUR:res.surplusEUR,
+      totalFinal:res.totalFinal, lines:res.lines.map(l=>({userId:l.userId,name:l.name,ancien:Number(l.ancien),nouveau:Number(l.nouveau),
+        conso:l.conso,partConso:l.partConso,partSurplus:l.partSurplus,total:l.total})), createdAt:new Date().toISOString() };
+
+    // Met à jour l'index de chaque propriétaire
+    const users = (copro.users||[]).map(u => {
+      const l = res.lines.find(x=>x.userId===u.id);
+      return l ? {...u, lastIndex:Number(l.nouveau)} : u;
+    });
+
+    // Crée l'appel de fonds (optionnel) — les membres voient directement leur montant
+    let appels = copro.appels||[];
+    if (createAppel) {
+      appels = [{ id:uid(), releveId:id, type:"eau", title:releve.title, date, note:"Relevé compteurs",
+        totalBill:releve.totalBill, invoiceM3:releve.invoiceM3, priceM3:res.pm3, totalConso:res.totalConso,
+        status:"active", createdAt:new Date().toISOString(),
+        payments: res.lines.map(l=>({ owner:l.userId, ownerName:l.name, amount:l.total, m3:l.conso,
+          priceM3:res.pm3, partSurplus:l.partSurplus, lastIndex:Number(l.ancien), currentIndex:Number(l.nouveau),
+          paid:false, paidDate:null })) }, ...appels];
+    }
+    await update({ relevesEau:[releve, ...(copro.relevesEau||[])], users, appels });
+    setEditing(false); setSaved(true); setTimeout(()=>setSaved(false),2500);
+  }
+
+  async function delReleve(r) {
+    if (r.id!==last?.id) { alert("Seul le dernier relevé peut être supprimé (pour garder les index cohérents)."); return; }
+    if (!confirm(`Supprimer le relevé "${r.title}" ? Les index reviendront aux valeurs précédentes.`)) return;
+    const users = (copro.users||[]).map(u => { const l=r.lines.find(x=>x.userId===u.id); return l?{...u,lastIndex:l.ancien}:u; });
+    const appels = (copro.appels||[]).filter(a=>a.releveId!==r.id);
+    await update({ relevesEau:(copro.relevesEau||[]).filter(x=>x.id!==r.id), users, appels });
+  }
+
+  const cell = {fontFamily:"system-ui",fontSize:13,color:"#e2e8f0"};
+  const head = {fontFamily:"system-ui",fontSize:10,fontWeight:700,color:"#475569",letterSpacing:1,textTransform:"uppercase"};
+
+  return (
+    <div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
+        <h2 style={{...S.h2,margin:0}}>💧 Relevés & calcul facture eau</h2>
+        {!editing && <Btn small onClick={startNew} disabled={!members.length}>+ Nouveau relevé</Btn>}
+      </div>
+      {saved && <div style={{...S.card,border:"1px solid #166834",color:"#4ade80",fontFamily:"system-ui",fontSize:13}}>✅ Relevé enregistré{createAppel?" — appel de fonds créé pour les membres":""}.</div>}
+      {!members.length && <Empty>Ajoutez d'abord des membres à la copropriété.</Empty>}
+
+      {editing && (
+        <div style={{...S.card,border:"1px solid #2563eb55"}}>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
+            <FL label="Titre *"><FI value={title} onChange={setTitle} placeholder="Eau T1 2026"/></FL>
+            <FL label="Date"><input type="date" value={date} onChange={e=>setDate(e.target.value)} style={S.inp}/></FL>
+            <FL label="Montant facture TTC"><NIn value={bill} onChange={setBill} placeholder="1254.16" unit="€"/></FL>
+            <FL label="m³ facturés"><NIn value={vol} onChange={setVol} placeholder="285" unit="m³"/></FL>
+          </div>
+
+          <div style={{border:"1px solid #1a3a5f33",borderRadius:12,overflow:"hidden",marginBottom:14}}>
+            <div style={{display:"grid",gridTemplateColumns:"1.6fr 1fr 1fr 0.8fr 1fr",gap:8,background:"#060c16",padding:"10px 14px"}}>
+              {["Propriétaire","Ancien","Nouveau","Conso","Total"].map(h=><div key={h} style={head}>{h}</div>)}
+            </div>
+            {lines.map((l,i)=>{
+              const r = res && !res.error ? res.lines[i] : null;
+              const conso = l.nouveau!==""&&l.ancien!=="" ? Number(l.nouveau)-Number(l.ancien) : null;
+              return (
+                <div key={l.userId} style={{display:"grid",gridTemplateColumns:"1.6fr 1fr 1fr 0.8fr 1fr",gap:8,padding:"10px 14px",alignItems:"center",background:i%2?"#090f1d":"#0c1829"}}>
+                  <div style={{...cell,fontWeight:600}}>{l.name}</div>
+                  <input type="number" step="0.001" value={l.ancien} onChange={e=>setLine(i,"ancien",e.target.value)} style={{...S.inp,padding:"8px 10px",color:"#94a3b8"}}/>
+                  <input type="number" step="0.001" value={l.nouveau} onChange={e=>setLine(i,"nouveau",e.target.value)} placeholder="index" style={{...S.inp,padding:"8px 10px",borderColor:"#2563eb"}}/>
+                  <div style={{...cell,color:conso!=null&&conso<0?"#f87171":"#38bdf8",fontWeight:700}}>{conso!=null?`${Math.round(conso*1000)/1000} m³`:"—"}</div>
+                  <div style={{...cell,color:"#4ade80",fontWeight:700}}>{r?fEUR(r.total):"—"}</div>
+                </div>
+              );
+            })}
+          </div>
+
+          {res?.error && <Err>{res.error}</Err>}
+          {res && !res.error && (
+            <div style={{background:"#060c16",borderRadius:12,padding:"14px 16px",border:"1px solid #1a3a5f",marginBottom:14,fontFamily:"system-ui",fontSize:13,lineHeight:1.9}}>
+              <div style={{display:"flex",justifyContent:"space-between"}}><span style={{color:"#64748b"}}>Prix du m³</span><strong style={{color:"#a78bfa"}}>{res.pm3.toFixed(5)} €</strong></div>
+              <div style={{display:"flex",justifyContent:"space-between"}}><span style={{color:"#64748b"}}>Total relevé / facturé</span><span style={{color:"#e2e8f0"}}>{res.totalConso} m³ / {Number(vol)} m³</span></div>
+              <div style={{display:"flex",justifyContent:"space-between"}}>
+                <span style={{color:"#64748b"}}>{res.surplusM3>=0?"Surplus":"Manque"} ({Math.abs(res.surplusM3)} m³)</span>
+                <span style={{color:res.surplusM3>=0?"#f59e0b":"#4ade80"}}>{res.surplusM3>=0?"+":"−"}{fEUR(Math.abs(res.surplusEUR))} → {res.surplusM3>=0?"+":"−"}{fEUR(Math.abs(res.lines[0].partSurplus))} / propriétaire</span>
+              </div>
+              <div style={{borderTop:"1px solid #1a3a5f",marginTop:6,paddingTop:6}}>
+                {res.lines.map(l=>(
+                  <div key={l.userId} style={{display:"flex",justifyContent:"space-between",fontSize:12}}>
+                    <span style={{color:"#94a3b8"}}>{l.name} : {l.conso} × {res.pm3.toFixed(5)} = {fEUR(l.partConso)} {l.partSurplus>=0?"+":"−"} {fEUR(Math.abs(l.partSurplus))}</span>
+                    <strong style={{color:"#4ade80"}}>{fEUR(l.total)}</strong>
+                  </div>
+                ))}
+              </div>
+              <div style={{display:"flex",justifyContent:"space-between",borderTop:"1px solid #1a3a5f",marginTop:6,paddingTop:6,fontSize:15}}>
+                <span style={{color:"#e2e8f0",fontWeight:700}}>TOTAL</span><strong style={{color:"#f59e0b"}}>{fEUR(res.totalFinal)}</strong>
+              </div>
+            </div>
+          )}
+
+          <label style={{display:"flex",alignItems:"center",gap:8,fontFamily:"system-ui",fontSize:13,color:"#94a3b8",marginBottom:14,cursor:"pointer"}}>
+            <input type="checkbox" checked={createAppel} onChange={e=>setCreateAppel(e.target.checked)}/>
+            Créer l'appel de fonds (chaque membre voit son montant à payer)
+          </label>
+          <div style={{display:"flex",gap:10}}>
+            <SecBtn onClick={()=>setEditing(false)}>Annuler</SecBtn>
+            <Btn onClick={save} disabled={!ok} full>💾 Enregistrer le relevé</Btn>
+          </div>
+        </div>
+      )}
+
+      <Sec title={`📜 Historique (${history.length})`}>
+        {!history.length && <Empty>Aucun relevé enregistré.</Empty>}
+        {history.map(r=>(
+          <div key={r.id} style={{...S.card,padding:"14px 16px"}}>
+            <div onClick={()=>setOpenId(openId===r.id?null:r.id)} style={{display:"flex",justifyContent:"space-between",alignItems:"center",cursor:"pointer"}}>
+              <div>
+                <div style={{fontFamily:"system-ui",fontSize:14,fontWeight:700,color:"#f0f9ff"}}>💧 {r.title}</div>
+                <div style={{fontFamily:"system-ui",fontSize:11,color:"#64748b",marginTop:2}}>
+                  {fDATE(r.date)} · {fEUR(r.totalBill)} / {r.invoiceM3} m³ · {r.pm3.toFixed(5)} €/m³ · {r.surplusM3>=0?"surplus":"manque"} {Math.abs(r.surplusM3)} m³
+                </div>
+              </div>
+              <div style={{fontFamily:"system-ui",fontWeight:700,color:"#f59e0b"}}>{fEUR(r.totalFinal)} {openId===r.id?"▲":"▼"}</div>
+            </div>
+            {openId===r.id && (
+              <div style={{marginTop:12}}>
+                {r.lines.map(l=>(
+                  <div key={l.userId} style={{display:"flex",justifyContent:"space-between",fontFamily:"system-ui",fontSize:12,padding:"6px 0",borderTop:"1px solid #1a3a5f33"}}>
+                    <span style={{color:"#94a3b8"}}>{l.name} — {l.ancien} → {l.nouveau} ({l.conso} m³) : {fEUR(l.partConso)} {l.partSurplus>=0?"+":"−"} {fEUR(Math.abs(l.partSurplus))}</span>
+                    <strong style={{color:"#4ade80"}}>{fEUR(l.total)}</strong>
+                  </div>
+                ))}
+                <div style={{textAlign:"right",marginTop:10}}>
+                  <button onClick={()=>delReleve(r)} style={{background:"none",border:"none",color:"#64748b",cursor:"pointer",fontSize:12,fontFamily:"system-ui"}}>🗑 Supprimer</button>
+                </div>
+              </div>
+            )}
+          </div>
+        ))}
+      </Sec>
     </div>
   );
 }
