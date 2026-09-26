@@ -1356,14 +1356,14 @@ function CalculEauTab({ db, persist }) {
   }
   const setLine = (i,k,v) => setLines(ls=>ls.map((l,j)=>j===i?{...l,[k]:v}:l));
   const res = editing ? calcReleve(lines, bill, vol) : null;
-  const ok = res && !res.error && title.trim() && lines.every(l=>l.name.trim());
+  const ok = res && res.complete && title.trim() && lines.every(l=>l.name.trim());
 
   async function save() {
     if (!ok) return;
     const entry = { id:uid(), title:title.trim(), date, createdAt:new Date().toISOString(),
-      totalBill:Number(bill), invoiceM3:Number(vol), pm3:res.pm3, totalConso:res.totalConso,
+      totalBill:numFR(bill), invoiceM3:numFR(vol), pm3:res.pm3, totalConso:res.totalConso,
       surplusM3:res.surplusM3, surplusEUR:res.surplusEUR, totalFinal:res.totalFinal,
-      lines:res.lines.map(l=>({ name:l.name.trim(), ancien:Number(l.ancien), nouveau:Number(l.nouveau),
+      lines:res.lines.map(l=>({ name:l.name.trim(), ancien:numFR(l.ancien), nouveau:numFR(l.nouveau),
         conso:l.conso, partConso:l.partConso, partSurplus:l.partSurplus, total:l.total })) };
     await persist({ ...db, calculsEau:[entry, ...(db.calculsEau||[])] });
     setEditing(false); setOpenId(entry.id);
@@ -1375,7 +1375,7 @@ function CalculEauTab({ db, persist }) {
 
   const head = {fontFamily:"system-ui",fontSize:10,fontWeight:700,color:"#475569",letterSpacing:1,textTransform:"uppercase"};
   const cell = {fontFamily:"system-ui",fontSize:13,color:"#e2e8f0"};
-  const grid = "1.6fr 1fr 1fr 0.8fr 1fr 28px";
+  const grid = "1.4fr 0.9fr 0.9fr 0.7fr 0.9fr 0.8fr 0.9fr 24px";
 
   return (
     <div>
@@ -1389,24 +1389,26 @@ function CalculEauTab({ db, persist }) {
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
             <FL label="Titre *"><FI value={title} onChange={setTitle} placeholder="Eau T1 2026"/></FL>
             <FL label="Date"><input type="date" value={date} onChange={e=>setDate(e.target.value)} style={S.inp}/></FL>
-            <FL label="Montant facture TTC"><NIn value={bill} onChange={setBill} placeholder="1254.16" unit="€"/></FL>
-            <FL label="m³ facturés"><NIn value={vol} onChange={setVol} placeholder="285" unit="m³"/></FL>
+            <FL label="Montant facture TTC"><DecIn value={bill} onChange={setBill} placeholder="1254.16" unit="€"/></FL>
+            <FL label="m³ facturés"><DecIn value={vol} onChange={setVol} placeholder="285" unit="m³"/></FL>
           </div>
 
           <div style={{border:"1px solid #1a3a5f33",borderRadius:12,overflow:"hidden",marginBottom:10}}>
             <div style={{display:"grid",gridTemplateColumns:grid,gap:8,background:"#060c16",padding:"10px 14px"}}>
-              {["Propriétaire","Ancien","Nouveau","Conso","Total",""].map((h,i)=><div key={i} style={head}>{h}</div>)}
+              {["Propriétaire","Ancien","Nouveau","Conso","Part conso","Surplus","Total",""].map((h,i)=><div key={i} style={head}>{h}</div>)}
             </div>
             {lines.map((l,i)=>{
-              const r = res && !res.error ? res.lines[i] : null;
+              const r = res ? res.lines[i] : null;
               const conso = l.nouveau!==""&&l.ancien!=="" ? Math.round((Number(l.nouveau)-Number(l.ancien))*1000)/1000 : null;
               return (
                 <div key={l.userId} style={{display:"grid",gridTemplateColumns:grid,gap:8,padding:"8px 14px",alignItems:"center",background:i%2?"#090f1d":"#0c1829"}}>
                   <input value={l.name} onChange={e=>setLine(i,"name",e.target.value)} placeholder="Nom" style={{...S.inp,padding:"8px 10px"}}/>
-                  <input type="number" step="0.001" value={l.ancien} onChange={e=>setLine(i,"ancien",e.target.value)} style={{...S.inp,padding:"8px 10px",color:"#94a3b8"}}/>
-                  <input type="number" step="0.001" value={l.nouveau} onChange={e=>setLine(i,"nouveau",e.target.value)} placeholder="index" style={{...S.inp,padding:"8px 10px",borderColor:"#2563eb"}}/>
+                  <input inputMode="decimal" value={l.ancien} onChange={e=>setLine(i,"ancien",e.target.value)} style={{...S.inp,padding:"8px 10px",color:"#94a3b8"}}/>
+                  <input inputMode="decimal" value={l.nouveau} onChange={e=>setLine(i,"nouveau",e.target.value)} placeholder="index" style={{...S.inp,padding:"8px 10px",borderColor:"#2563eb"}}/>
                   <div style={{...cell,fontWeight:700,color:conso!=null&&conso<0?"#f87171":"#38bdf8"}}>{conso!=null?`${conso} m³`:"—"}</div>
-                  <div style={{...cell,fontWeight:700,color:"#4ade80"}}>{r?fEUR(r.total):"—"}</div>
+                  <div style={{...cell,fontSize:12,color:"#a78bfa"}}>{r&&r.partConso!=null?fEUR(r.partConso):"—"}</div>
+                  <div style={{...cell,fontSize:12,color:r&&r.partSurplus<0?"#4ade80":"#f59e0b"}}>{r&&r.partSurplus!=null?(r.partSurplus>=0?"+":"−")+fEUR(Math.abs(r.partSurplus)):"—"}</div>
+                  <div style={{...cell,fontWeight:700,color:"#4ade80"}}>{r&&r.total!=null?fEUR(r.total):"—"}</div>
                   <button onClick={()=>setLines(ls=>ls.filter((_,j)=>j!==i))} title="Retirer" style={{background:"none",border:"none",color:"#64748b",cursor:"pointer"}}>✕</button>
                 </div>
               );
@@ -1418,13 +1420,14 @@ function CalculEauTab({ db, persist }) {
           </button>
 
           {res?.error && <Err>{res.error}</Err>}
-          {res && !res.error && (
+          {res && !res.complete && !res.error && <div style={{fontFamily:"system-ui",fontSize:12,color:"#f59e0b",marginBottom:14}}>ℹ️ {res.missing}</div>}
+          {res && res.complete && (
             <div style={{background:"#060c16",borderRadius:12,padding:"14px 16px",border:"1px solid #1a3a5f",marginBottom:14,fontFamily:"system-ui",fontSize:13,lineHeight:1.9}}>
               <div style={{display:"flex",justifyContent:"space-between"}}><span style={{color:"#64748b"}}>Prix du m³</span><strong style={{color:"#a78bfa"}}>{res.pm3.toFixed(5)} €</strong></div>
-              <div style={{display:"flex",justifyContent:"space-between"}}><span style={{color:"#64748b"}}>Relevé / facturé</span><span>{res.totalConso} m³ / {Number(vol)} m³</span></div>
+              <div style={{display:"flex",justifyContent:"space-between"}}><span style={{color:"#64748b"}}>Relevé / facturé</span><span>{res.totalConso} m³ / {numFR(vol)} m³</span></div>
               <div style={{display:"flex",justifyContent:"space-between"}}>
                 <span style={{color:"#64748b"}}>{res.surplusM3>=0?"Surplus":"Manque"} {Math.abs(res.surplusM3)} m³</span>
-                <span style={{color:res.surplusM3>=0?"#f59e0b":"#4ade80"}}>{res.surplusM3>=0?"+":"−"}{fEUR(Math.abs(res.lines[0].partSurplus))} / propriétaire</span>
+                <span style={{color:res.surplusM3>=0?"#f59e0b":"#4ade80"}}>{res.surplusM3>=0?"+":"−"}{fEUR(Math.abs(res.partSurplus))} / propriétaire</span>
               </div>
               <div style={{borderTop:"1px solid #1a3a5f",marginTop:6,paddingTop:6}}>
                 {res.lines.map(l=>(
@@ -1480,25 +1483,31 @@ function CalculEauTab({ db, persist }) {
 }
 
 // ─── Relevés eau (syndic) — calculateur + historique ───────
+const numFR = v => { if (v===""||v==null) return null; const n = Number(String(v).replace(/\s/g,"").replace(",", ".")); return isNaN(n)?null:n; };
 function calcReleve(lines, totalBill, invoiceM3) {
-  const bill = Number(totalBill)||0, vol = Number(invoiceM3)||0;
-  const valid = lines.filter(l => l.nouveau!=="" && l.ancien!=="" && !isNaN(Number(l.nouveau)) && !isNaN(Number(l.ancien)));
-  if (!bill || !vol || valid.length!==lines.length || !lines.length) return null;
-  const pm3 = bill / vol;
-  const withConso = lines.map(l => ({ ...l, conso: Math.round((Number(l.nouveau)-Number(l.ancien))*1000)/1000 }));
-  if (withConso.some(l => l.conso < 0)) return { error: "Un nouvel index est inférieur à l'ancien." };
-  const totalConso = withConso.reduce((s,l)=>s+l.conso,0);
-  const surplusM3  = Math.round((totalConso - vol)*1000)/1000;   // + = surplus, − = manque
-  const surplusEUR = surplusM3 * pm3;
-  const partSurplus = surplusEUR / lines.length;
-  const out = withConso.map(l => {
-    // Chaque part est arrondie, puis additionnée → le détail affiché tombe juste
-    const pc = Math.round(l.conso * pm3 * 100)/100;
-    const ps = Math.round(partSurplus * 100)/100;
-    return { ...l, partConso: pc, partSurplus: ps, total: Math.round((pc + ps)*100)/100 };
+  const bill = numFR(totalBill), vol = numFR(invoiceM3);
+  const pm3 = bill>0 && vol>0 ? bill/vol : null;
+  const rows = lines.map(l => {
+    const a = numFR(l.ancien), n = numFR(l.nouveau);
+    const conso = a!=null && n!=null ? Math.round((n-a)*1000)/1000 : null;
+    const partConso = conso!=null && pm3 ? Math.round(conso*pm3*100)/100 : null;
+    return { ...l, conso, partConso, partSurplus:null, total:null };
   });
-  return { lines: out, pm3, totalConso, surplusM3, surplusEUR: Math.round(surplusEUR*100)/100,
-           totalFinal: Math.round(out.reduce((s,l)=>s+l.total,0)*100)/100 };
+  const missing = [];
+  if (!(bill>0)) missing.push("le montant de la facture");
+  if (!(vol>0))  missing.push("les m³ facturés");
+  if (rows.some(r=>r.conso==null)) missing.push("tous les index (ancien et nouveau)");
+  if (rows.some(r=>r.conso!=null && r.conso<0)) return { pm3, lines:rows, error:"Un nouvel index est inférieur à l'ancien.", complete:false };
+  if (missing.length || !rows.length) return { pm3, lines:rows, complete:false, missing:"Pour finir le calcul, remplissez : "+missing.join(", ")+"." };
+
+  // Méthode officielle : surplus = (Σ conso − m³ facturés) × prix m³, divisé par le nb de propriétaires
+  const totalConso = Math.round(rows.reduce((s,r)=>s+r.conso,0)*1000)/1000;
+  const surplusM3  = Math.round((totalConso - vol)*1000)/1000;
+  const surplusEUR = surplusM3 * pm3;
+  const ps = Math.round(surplusEUR / rows.length * 100)/100;
+  const out = rows.map(r => ({ ...r, partSurplus: ps, total: Math.round((r.partConso + ps)*100)/100 }));
+  return { pm3, lines:out, complete:true, totalConso, surplusM3, surplusEUR:Math.round(surplusEUR*100)/100,
+           partSurplus:ps, totalFinal:Math.round(out.reduce((s,r)=>s+r.total,0)*100)/100 };
 }
 
 function RelevesTab({ copro, members, update }) {
@@ -1526,20 +1535,20 @@ function RelevesTab({ copro, members, update }) {
 
   const setLine = (i, k, v) => setLines(ls => ls.map((l,j)=>j===i?{...l,[k]:v}:l));
   const res = editing ? calcReleve(lines, bill, vol) : null;
-  const ok  = res && !res.error && title.trim();
+  const ok  = res && res.complete && title.trim();
 
   async function save() {
     if (!ok) return;
     const id = uid();
-    const releve = { id, title:title.trim(), date, totalBill:Number(bill), invoiceM3:Number(vol),
+    const releve = { id, title:title.trim(), date, totalBill:numFR(bill), invoiceM3:numFR(vol),
       pm3:res.pm3, totalConso:res.totalConso, surplusM3:res.surplusM3, surplusEUR:res.surplusEUR,
-      totalFinal:res.totalFinal, lines:res.lines.map(l=>({userId:l.userId,name:l.name,ancien:Number(l.ancien),nouveau:Number(l.nouveau),
+      totalFinal:res.totalFinal, lines:res.lines.map(l=>({userId:l.userId,name:l.name,ancien:numFR(l.ancien),nouveau:numFR(l.nouveau),
         conso:l.conso,partConso:l.partConso,partSurplus:l.partSurplus,total:l.total})), createdAt:new Date().toISOString() };
 
     // Met à jour l'index de chaque propriétaire
     const users = (copro.users||[]).map(u => {
       const l = res.lines.find(x=>x.userId===u.id);
-      return l ? {...u, lastIndex:Number(l.nouveau)} : u;
+      return l ? {...u, lastIndex:numFR(l.nouveau)} : u;
     });
 
     // Crée l'appel de fonds (optionnel) — les membres voient directement leur montant
@@ -1549,7 +1558,7 @@ function RelevesTab({ copro, members, update }) {
         totalBill:releve.totalBill, invoiceM3:releve.invoiceM3, priceM3:res.pm3, totalConso:res.totalConso,
         status:"active", createdAt:new Date().toISOString(),
         payments: res.lines.map(l=>({ owner:l.userId, ownerName:l.name, amount:l.total, m3:l.conso,
-          priceM3:res.pm3, partSurplus:l.partSurplus, lastIndex:Number(l.ancien), currentIndex:Number(l.nouveau),
+          priceM3:res.pm3, partSurplus:l.partSurplus, lastIndex:numFR(l.ancien), currentIndex:numFR(l.nouveau),
           paid:false, paidDate:null })) }, ...appels];
     }
     await update({ relevesEau:[releve, ...(copro.relevesEau||[])], users, appels });
@@ -1581,37 +1590,40 @@ function RelevesTab({ copro, members, update }) {
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
             <FL label="Titre *"><FI value={title} onChange={setTitle} placeholder="Eau T1 2026"/></FL>
             <FL label="Date"><input type="date" value={date} onChange={e=>setDate(e.target.value)} style={S.inp}/></FL>
-            <FL label="Montant facture TTC"><NIn value={bill} onChange={setBill} placeholder="1254.16" unit="€"/></FL>
-            <FL label="m³ facturés"><NIn value={vol} onChange={setVol} placeholder="285" unit="m³"/></FL>
+            <FL label="Montant facture TTC"><DecIn value={bill} onChange={setBill} placeholder="1254.16" unit="€"/></FL>
+            <FL label="m³ facturés"><DecIn value={vol} onChange={setVol} placeholder="285" unit="m³"/></FL>
           </div>
 
           <div style={{border:"1px solid #1a3a5f33",borderRadius:12,overflow:"hidden",marginBottom:14}}>
-            <div style={{display:"grid",gridTemplateColumns:"1.6fr 1fr 1fr 0.8fr 1fr",gap:8,background:"#060c16",padding:"10px 14px"}}>
-              {["Propriétaire","Ancien","Nouveau","Conso","Total"].map(h=><div key={h} style={head}>{h}</div>)}
+            <div style={{display:"grid",gridTemplateColumns:"1.4fr 0.9fr 0.9fr 0.7fr 0.9fr 0.8fr 0.9fr",gap:8,background:"#060c16",padding:"10px 14px"}}>
+              {["Propriétaire","Ancien","Nouveau","Conso","Part conso","Surplus","Total"].map(h=><div key={h} style={head}>{h}</div>)}
             </div>
             {lines.map((l,i)=>{
-              const r = res && !res.error ? res.lines[i] : null;
-              const conso = l.nouveau!==""&&l.ancien!=="" ? Number(l.nouveau)-Number(l.ancien) : null;
+              const r = res ? res.lines[i] : null;
+              const conso = l.nouveau!==""&&l.ancien!=="" ? numFR(l.nouveau)-numFR(l.ancien) : null;
               return (
-                <div key={l.userId} style={{display:"grid",gridTemplateColumns:"1.6fr 1fr 1fr 0.8fr 1fr",gap:8,padding:"10px 14px",alignItems:"center",background:i%2?"#090f1d":"#0c1829"}}>
+                <div key={l.userId} style={{display:"grid",gridTemplateColumns:"1.4fr 0.9fr 0.9fr 0.7fr 0.9fr 0.8fr 0.9fr",gap:8,padding:"10px 14px",alignItems:"center",background:i%2?"#090f1d":"#0c1829"}}>
                   <div style={{...cell,fontWeight:600}}>{l.name}</div>
-                  <input type="number" step="0.001" value={l.ancien} onChange={e=>setLine(i,"ancien",e.target.value)} style={{...S.inp,padding:"8px 10px",color:"#94a3b8"}}/>
-                  <input type="number" step="0.001" value={l.nouveau} onChange={e=>setLine(i,"nouveau",e.target.value)} placeholder="index" style={{...S.inp,padding:"8px 10px",borderColor:"#2563eb"}}/>
+                  <input inputMode="decimal" value={l.ancien} onChange={e=>setLine(i,"ancien",e.target.value)} style={{...S.inp,padding:"8px 10px",color:"#94a3b8"}}/>
+                  <input inputMode="decimal" value={l.nouveau} onChange={e=>setLine(i,"nouveau",e.target.value)} placeholder="index" style={{...S.inp,padding:"8px 10px",borderColor:"#2563eb"}}/>
                   <div style={{...cell,color:conso!=null&&conso<0?"#f87171":"#38bdf8",fontWeight:700}}>{conso!=null?`${Math.round(conso*1000)/1000} m³`:"—"}</div>
-                  <div style={{...cell,color:"#4ade80",fontWeight:700}}>{r?fEUR(r.total):"—"}</div>
+                  <div style={{...cell,fontSize:12,color:"#a78bfa"}}>{r&&r.partConso!=null?fEUR(r.partConso):"—"}</div>
+                  <div style={{...cell,fontSize:12,color:r&&r.partSurplus<0?"#4ade80":"#f59e0b"}}>{r&&r.partSurplus!=null?(r.partSurplus>=0?"+":"−")+fEUR(Math.abs(r.partSurplus)):"—"}</div>
+                  <div style={{...cell,color:"#4ade80",fontWeight:700}}>{r&&r.total!=null?fEUR(r.total):"—"}</div>
                 </div>
               );
             })}
           </div>
 
           {res?.error && <Err>{res.error}</Err>}
-          {res && !res.error && (
+          {res && !res.complete && !res.error && <div style={{fontFamily:"system-ui",fontSize:12,color:"#f59e0b",marginBottom:14}}>ℹ️ {res.missing}</div>}
+          {res && res.complete && (
             <div style={{background:"#060c16",borderRadius:12,padding:"14px 16px",border:"1px solid #1a3a5f",marginBottom:14,fontFamily:"system-ui",fontSize:13,lineHeight:1.9}}>
               <div style={{display:"flex",justifyContent:"space-between"}}><span style={{color:"#64748b"}}>Prix du m³</span><strong style={{color:"#a78bfa"}}>{res.pm3.toFixed(5)} €</strong></div>
-              <div style={{display:"flex",justifyContent:"space-between"}}><span style={{color:"#64748b"}}>Total relevé / facturé</span><span style={{color:"#e2e8f0"}}>{res.totalConso} m³ / {Number(vol)} m³</span></div>
+              <div style={{display:"flex",justifyContent:"space-between"}}><span style={{color:"#64748b"}}>Total relevé / facturé</span><span style={{color:"#e2e8f0"}}>{res.totalConso} m³ / {numFR(vol)} m³</span></div>
               <div style={{display:"flex",justifyContent:"space-between"}}>
                 <span style={{color:"#64748b"}}>{res.surplusM3>=0?"Surplus":"Manque"} ({Math.abs(res.surplusM3)} m³)</span>
-                <span style={{color:res.surplusM3>=0?"#f59e0b":"#4ade80"}}>{res.surplusM3>=0?"+":"−"}{fEUR(Math.abs(res.surplusEUR))} → {res.surplusM3>=0?"+":"−"}{fEUR(Math.abs(res.lines[0].partSurplus))} / propriétaire</span>
+                <span style={{color:res.surplusM3>=0?"#f59e0b":"#4ade80"}}>{res.surplusM3>=0?"+":"−"}{fEUR(Math.abs(res.surplusEUR))} → {res.surplusM3>=0?"+":"−"}{fEUR(Math.abs(res.partSurplus))} / propriétaire</span>
               </div>
               <div style={{borderTop:"1px solid #1a3a5f",marginTop:6,paddingTop:6}}>
                 {res.lines.map(l=>(
@@ -2027,6 +2039,9 @@ function SepaVirement({ copro, payment, user, appelTitle, onSignal }) {
 }
 
 // Bouton copier dans le presse-papiers
+const DecIn = ({value,onChange,placeholder,unit})=>(
+  <div style={{position:"relative"}}><input inputMode="decimal" value={value} onChange={e=>onChange(e.target.value)} placeholder={placeholder} style={{...S.inp,paddingRight:44}}/><span style={{position:"absolute",right:12,top:"50%",transform:"translateY(-50%)",color:"#64748b",fontFamily:"system-ui",fontSize:12,fontWeight:700}}>{unit}</span></div>
+);
 function CopyBtn({ text, label="Copier" }) {
   const [done, setDone] = useState(false);
   function copy() {
